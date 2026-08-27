@@ -2,10 +2,14 @@ FROM python:3.12-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
+# Override on networks that block files.pythonhosted.org:
+#   podman build --build-arg UV_DEFAULT_INDEX=https://<mirror>/simple .
+ARG UV_DEFAULT_INDEX=https://pypi.org/simple
+
 ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX} \
     PATH="/app/.venv/bin:$PATH" \
     HOST=0.0.0.0 \
     PORT=2009 \

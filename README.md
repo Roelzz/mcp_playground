@@ -72,13 +72,32 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-## Network note: PyPI mirror
+## Network note: blocked PyPI downloads
 
-This machine and network sit behind Microsoft Entra Global Secure Access. That policy blocks `files.pythonhosted.org`, even inside containers. `pypi.org` can resolve, but package downloads fail because the files host is blocked.
+The project uses the public PyPI index. On some corporate networks — including any
+machine behind Microsoft Entra Global Secure Access — `files.pythonhosted.org` is
+blocked by web filtering, so `pypi.org` resolves but package downloads fail. The block
+applies inside containers too.
 
-`pyproject.toml` pins the Tsinghua University PyPI mirror as the default UV index. The Dockerfile copies `pyproject.toml` and `uv.lock` before `uv sync`, so the container build inherits the same mirror. It also sets `UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple` as a belt-and-braces fallback.
+If you hit that, point UV at a mirror without committing it as project config.
 
-This mirror is a known smell, not a production standard. For a production or Microsoft-shop deployment, replace it with an Azure Artifacts feed that has a PyPI upstream.
+Host-side (`uv sync`, `uv run`):
+
+```bash
+export UV_DEFAULT_INDEX=https://<your-mirror>/simple
+```
+
+Container build:
+
+```bash
+podman build --build-arg UV_DEFAULT_INDEX=https://<your-mirror>/simple -t mcp-playground .
+```
+
+`uv.lock` records upstream PyPI URLs plus sha256 hashes. A mirror that copies the
+pythonhosted layout serves identical artefacts, so the hashes still verify.
+
+For a production or Microsoft-shop deployment, use an Azure Artifacts feed with a PyPI
+upstream instead of a public mirror.
 
 ## Roadmap
 

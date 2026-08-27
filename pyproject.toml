@@ -21,13 +21,6 @@ dev = [
     "ruff",
 ]
 
-# files.pythonhosted.org is blocked by Entra Global Secure Access web filtering.
-# Swap for an Azure Artifacts feed with a PyPI upstream when one is available.
-[[tool.uv.index]]
-name = "mirror"
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true
-
 [tool.ruff]
 line-length = 100
 target-version = "py312"
