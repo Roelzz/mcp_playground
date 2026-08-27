@@ -55,7 +55,9 @@
     editingServerId: null,
     editingDatasetId: null,
     editingEndpointId: null,
-    editingLlmId: null
+    editingLlmId: null,
+    relationships: [],
+    validateResult: null
   };
 
   var app = document.getElementById("app");
@@ -266,7 +268,7 @@
     state.servers = initial[0];
     state.catalog = initial[1] || [];
     if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
-    await Promise.all([loadDatasets(), loadEndpoints(), loadLlms()]);
+    await Promise.all([loadDatasets(), loadEndpoints(), loadLlms(), loadRelationships()]);
   }
 
   async function loadCatalog() {
@@ -315,6 +317,12 @@
     var rows = await api("/api/datasets/" + id + "/rows");
     state.datasetDetails[id] = detail;
     state.datasetRows[id] = rows;
+  }
+
+  async function loadRelationships() {
+    var server = selectedServer();
+    state.relationships = server ? await api("/api/servers/" + server.id + "/relationships") : [];
+    state.validateResult = null;
   }
 
   async function loadEndpoints() {
@@ -559,7 +567,68 @@
       "<div class=\"form-row\"><label for=\"data-format\">Input format</label><select id=\"data-format\" name=\"format\"><option value=\"auto\">Auto-detect</option><option value=\"json\">JSON</option><option value=\"csv\">CSV</option></select><span class=\"help\">Auto: first non-whitespace '[' or '{' means JSON; otherwise CSV.</span></div>" +
       area("rows_text", "Rows", "", "Paste a JSON array or CSV with a header row", "json") + "<div id=\"dataset-preview\" class=\"tabs-note\">Paste rows to preview the schema.</div>" +
       "<button class=\"btn primary\" type=\"submit\"" + disabledIfReadonly() + ">Create dataset</button></form><h3>Datasets</h3><div class=\"select-list\">" + datasetListHtml() + "</div></section>" +
-      "<section class=\"panel\">" + datasetDetailHtml(detail, rows) + "</section></div>");
+      "<section class=\"panel\">" + datasetDetailHtml(detail, rows) + "</section></div>" + renderRelationships());
+  }
+
+  function renderRelationships() {
+    if (!selectedServer()) return "";
+    var server = selectedServer();
+    var rels = state.relationships || [];
+    function relDatasetKey(id) {
+      var ds = state.datasets.find(function (d) { return String(d.id) === String(id); });
+      return ds ? ds.key : "dataset #" + id;
+    }
+    var tableHtml = rels.length
+      ? "<div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>Source</th><th>Target</th><th>Type</th><th>Expand</th><th>Inverse</th><th>Req</th><th></th></tr></thead><tbody>" +
+        rels.map(function (r) {
+          return "<tr><td><strong>" + esc(r.name) + "</strong>" + (r.description ? "<div class=\"help\">" + esc(r.description) + "</div>" : "") + "</td>" +
+            "<td><code>" + esc(relDatasetKey(r.source_dataset_id) + "." + r.source_field) + "</code></td>" +
+            "<td><code>" + esc(relDatasetKey(r.target_dataset_id) + "." + r.target_field) + "</code></td>" +
+            "<td><span class=\"badge neutral\">" + esc(r.relation_type) + "</span></td>" +
+            "<td><code>" + esc(r.expand_name) + "</code></td>" +
+            "<td>" + (r.inverse_expand_name ? "<code>" + esc(r.inverse_expand_name) + "</code>" : "<span class=\"help\">—</span>") + "</td>" +
+            "<td>" + (r.required ? "✓" : "") + "</td>" +
+            "<td><button class=\"btn small danger\" data-action=\"delete-relationship\" data-id=\"" + r.id + "\" data-name=\"" + esc(r.name) + "\"" + disabledIfReadonly() + ">Delete</button></td></tr>";
+        }).join("") + "</tbody></table></div>"
+      : "<div class=\"empty\">No relationships for this server. Use the form below or &ldquo;Create demo relationships&rdquo; to get started.</div>";
+
+    var validateHtml = "";
+    var vr = state.validateResult;
+    if (vr) {
+      if (vr.ok && (!vr.issues || !vr.issues.length)) {
+        validateHtml = "<div class=\"callout ok\"><strong>✓ Valid</strong> — " + vr.relationship_count + " relationship" + (vr.relationship_count === 1 ? "" : "s") + ", no issues found.</div>";
+      } else {
+        validateHtml = "<div class=\"callout warn\"><strong>" + (vr.issues ? vr.issues.length : 0) + " issue" + (vr.issues && vr.issues.length === 1 ? "" : "s") + " found</strong> (" + (vr.relationship_count || 0) + " relationships checked)</div>" +
+          (vr.issues && vr.issues.length ? "<div class=\"table-wrap\"><table><thead><tr><th>Relationship</th><th>Severity</th><th>Message</th></tr></thead><tbody>" +
+            vr.issues.map(function (issue) {
+              return "<tr><td>" + esc(issue.name || "#" + issue.relationship_id) + "</td><td><span class=\"badge " + (issue.severity === "error" ? "bad" : "neutral") + "\">" + esc(issue.severity) + "</span></td><td>" + esc(issue.message) + "</td></tr>";
+            }).join("") + "</tbody></table></div>" : "");
+      }
+    }
+
+    var datasetOptions = state.datasets.map(function (d) { return [String(d.id), d.key]; });
+    var createForm = "<form class=\"form-grid\" data-form=\"relationship\">" +
+      input("name", "Relationship name", "", "order_lines_to_orders") +
+      "<div class=\"form-row\"><label for=\"rel-src-dataset\">Source dataset</label><select id=\"rel-src-dataset\" name=\"source_dataset_id\" required>" +
+      datasetOptions.map(function (o) { return "<option value=\"" + esc(o[0]) + "\">" + esc(o[1]) + "</option>"; }).join("") +
+      "</select></div>" +
+      input("source_field", "Source field", "", "order_id") +
+      "<div class=\"form-row\"><label for=\"rel-tgt-dataset\">Target dataset</label><select id=\"rel-tgt-dataset\" name=\"target_dataset_id\" required>" +
+      datasetOptions.map(function (o) { return "<option value=\"" + esc(o[0]) + "\">" + esc(o[1]) + "</option>"; }).join("") +
+      "</select></div>" +
+      input("target_field", "Target field", "", "id") +
+      select("relation_type", "Relation type", "many_to_one", [["many_to_one", "many_to_one"], ["one_to_one", "one_to_one"]]) +
+      input("expand_name", "Expand name", "", "order") +
+      input("inverse_expand_name", "Inverse expand name (optional)", "", "lines") +
+      "<div class=\"form-row\"><label class=\"rel-inline-label\"><input type=\"checkbox\" name=\"required\" style=\"width:auto\"> Required</label></div>" +
+      area("description", "Description (optional)", "", "Human-readable description") +
+      "<div class=\"actions\"><button class=\"btn primary\" type=\"submit\"" + disabledIfReadonly() + ">Create relationship</button></div></form>";
+
+    return "<section class=\"panel rel-panel\"><div class=\"page-head\"><div><h2>Relationships</h2><p class=\"page-desc\">" + rels.length + " relationship" + (rels.length === 1 ? "" : "s") + " for " + esc(server.name) + "</p></div>" +
+      "<div class=\"actions\"><button class=\"btn\" data-action=\"validate-relationships\">Validate</button><button class=\"btn\" data-action=\"ensure-demo-relationships\" title=\"Idempotent — safe to run multiple times. Already-existing relationships are skipped.\"" + disabledIfReadonly() + ">Create demo relationships</button></div></div>" +
+      "<div class=\"callout\">Relationships are metadata over JSON rows — they enable the <code>expand</code> query parameter to join datasets at query time but do not enforce foreign-key constraints in the database.</div>" +
+      tableHtml + validateHtml +
+      "<h3>Create relationship</h3>" + createForm + "</section>";
   }
 
   function datasetListHtml() {
@@ -991,6 +1060,19 @@
       hints += "<div class=\"help\" style=\"margin-top:6px\">Calls <code>" + esc(restUrl(selectedServer(), endpoint)) + "</code>. Path placeholders are filled from the parameters; the rest go in the " + (sendsBody ? "JSON body" : "query string") + ".</div>";
     }
     help.innerHTML = hints;
+    var toolValue = selectEl.value;
+    if (endpoint.dataset_id) {
+      api("/api/datasets/" + endpoint.dataset_id + "/expands", { silentError: true }).then(function (expands) {
+        if (!expands || !expands.length) return;
+        var helpEl = document.getElementById("tool-help");
+        if (!helpEl || !document.getElementById("tool-select") || document.getElementById("tool-select").value !== toolValue) return;
+        var rows = expands.map(function (ex) {
+          return "<tr><td><code>" + esc(ex.name) + "</code></td><td>" + esc(ex.direction) + "</td><td><span class=\"badge neutral\">" + esc(ex.returns) + "</span></td><td><code>?expand=" + esc(ex.name) + "</code></td></tr>";
+        }).join("");
+        helpEl.innerHTML += "<div class=\"rel-expand-hints\"><strong>Available expands</strong>" +
+          "<div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>Direction</th><th>Returns</th><th>Example</th></tr></thead><tbody>" + rows + "</tbody></table></div></div>";
+      });
+    }
   }
 
   function applyToolSearch() {
@@ -1108,7 +1190,7 @@
   }
 
   async function refreshForServer() {
-    await Promise.all([loadDatasets(), loadEndpoints()]);
+    await Promise.all([loadDatasets(), loadEndpoints(), loadRelationships()]);
   }
 
   document.addEventListener("input", function (event) {
@@ -1168,6 +1250,7 @@
       if (form.dataset.form === "llm") await submitLlm(form);
       if (form.dataset.form === "tool-call") await submitToolCall(form);
       if (form.dataset.form === "key") await submitKey(form);
+      if (form.dataset.form === "relationship") await submitRelationship(form);
     } catch (err) {
       if (err.message !== "not authenticated") toast(err.message, "error");
     } finally {
@@ -1217,6 +1300,9 @@
       if (action === "select-connect-platform") { state.connectPlatform = button.dataset.platform; render(); }
       if (action === "dismiss-key") { state.newKey = null; render(); }
       if (action === "delete-key") await deleteItem("API key", button.dataset.id, button.dataset.name, "/api/keys/" + button.dataset.id, async function () { await loadKeys(); });
+      if (action === "delete-relationship") await deleteItem("relationship", button.dataset.id, button.dataset.name, "/api/relationships/" + button.dataset.id, loadRelationships);
+      if (action === "validate-relationships") await validateRelationships(button);
+      if (action === "ensure-demo-relationships") await ensureDemoRelationships(button);
     } catch (err) {
       if (err.message !== "not authenticated") toast(err.message, "error");
     }
@@ -1426,6 +1512,51 @@
     toast(kind + " deleted.", "ok");
   }
 
+  async function submitRelationship(form) {
+    var data = formData(form);
+    var body = {
+      name: data.name,
+      source_dataset_id: Number(data.source_dataset_id),
+      source_field: data.source_field,
+      target_dataset_id: Number(data.target_dataset_id),
+      target_field: data.target_field,
+      relation_type: data.relation_type,
+      expand_name: data.expand_name,
+      inverse_expand_name: data.inverse_expand_name || null,
+      required: !!data.required,
+      description: data.description || null
+    };
+    var server = selectedServer();
+    await api("/api/servers/" + server.id + "/relationships", { method: "POST", body: JSON.stringify(body) });
+    await loadRelationships();
+    render();
+    toast("Relationship created.", "ok");
+  }
+
+  async function validateRelationships(button) {
+    var server = selectedServer();
+    if (!server) return;
+    setBusy(button, true);
+    try {
+      state.validateResult = await api("/api/servers/" + server.id + "/relationships/validate");
+      render();
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function ensureDemoRelationships(button) {
+    setBusy(button, true);
+    try {
+      var result = await api("/api/relationships/ensure-demo", { method: "POST", body: JSON.stringify({}) });
+      await loadRelationships();
+      render();
+      toast("Demo relationships: " + result.relationships_created + " created, " + result.skipped_existing + " skipped, " + result.servers_touched + " servers touched.", "ok");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function confirmPost(title, message, url) {
     if (!await confirmModal(title, message, "Continue")) return;
     var detail = await api(url, { method: "POST" });
@@ -1507,7 +1638,7 @@
     try {
       if (state.tab === "catalog") await loadCatalog();
       if (state.tab === "cohort") await loadCohortPage();
-      if (state.tab === "datasets") await loadDatasets();
+      if (state.tab === "datasets") { await loadDatasets(); await loadRelationships(); }
       if (state.tab === "endpoints") await refreshForServer();
       if (state.tab === "llm") await loadLlms();
       if (state.tab === "traffic") state.traffic = await api("/api/traffic");

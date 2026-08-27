@@ -305,6 +305,10 @@ tr:last-child td { border-bottom: 0; }
   .copy-line { grid-template-columns: 1fr; }
 }
 
+.rel-panel { margin-top: 24px; }
+.rel-expand-hints { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--brand-line); }
+.rel-inline-label { display: flex; align-items: center; gap: 6px; }
+
 @media print {
   body { background: white; color: #111; }
   .top-warning, .sidebar, .page-head, .cohort-no-print, .btn, input, select, textarea { display: none !important; }
