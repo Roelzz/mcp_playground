@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 import auth
 import service
+import store
 
 router = APIRouter(prefix="/v1", tags=["llm"])
 
@@ -288,6 +289,26 @@ def list_models(
     }
 
 
+def _log_llm(
+    conn: sqlite3.Connection,
+    slug: str,
+    started: float,
+    status: str,
+    request: dict[str, Any],
+    response: Any,
+) -> None:
+    store.log_call(
+        conn,
+        kind="llm",
+        status=status,
+        target_slug=slug,
+        tool_name="chat/completions",
+        request=request,
+        response=response,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
 @router.post("/{slug}/chat/completions", response_model=None)
 async def chat_completions(
     slug: str,
@@ -296,7 +317,13 @@ async def chat_completions(
     authorization: AuthorizationHeader = None,
 ) -> dict[str, Any] | Response:
     _ = authorization
-    llm = _handle(service.get_llm_endpoint_by_slug, conn, slug)
+    started = time.perf_counter()
+    logged = {"model": body.model, "stream": body.stream, "messages": body.messages}
+    try:
+        llm = _handle(service.get_llm_endpoint_by_slug, conn, slug)
+    except HTTPException as exc:
+        _log_llm(conn, slug, started, "not_found", logged, {"error": exc.detail})
+        raise
     matched = False
 
     if llm["mode"] == "mock":
@@ -307,6 +334,7 @@ async def chat_completions(
             f"llm completion slug={slug!r} mode={llm['mode']!r} "
             f"stream={body.stream} rule_matched={matched}"
         )
+        _log_llm(conn, slug, started, "ok", logged, {"text": text, "rule_matched": matched})
         if body.stream:
             return StreamingResponse(
                 _mock_stream(llm["model_name"], text),
@@ -318,6 +346,14 @@ async def chat_completions(
         f"llm completion slug={slug!r} mode={llm['mode']!r} "
         f"stream={body.stream} rule_matched={matched}"
     )
-    if body.stream:
-        return await _proxy_stream(llm, body)
-    return await _proxy_completion(llm, body)
+    try:
+        if body.stream:
+            result = await _proxy_stream(llm, body)
+            _log_llm(conn, slug, started, "ok", logged, {"proxy": "stream"})
+            return result
+        result = await _proxy_completion(llm, body)
+        _log_llm(conn, slug, started, "ok", logged, {"proxy": "completion"})
+        return result
+    except HTTPException as exc:
+        _log_llm(conn, slug, started, str(exc.status_code), logged, {"error": exc.detail})
+        raise

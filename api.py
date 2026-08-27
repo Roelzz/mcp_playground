@@ -253,9 +253,13 @@ def call_tool(
     tool_name: str,
     body: dict[str, Any] | None = None,
     conn: sqlite3.Connection = Conn,
-    _: Principal = Admin,
+    principal: Principal = Admin,
 ) -> Any:
-    return {"result": _handle(service.call_tool, conn, slug, tool_name, body or {})}
+    return {
+        "result": _handle(
+            service.call_tool, conn, slug, tool_name, body or {}, "api", principal.label
+        )
+    }
 
 
 # --------------------------------------------------------------------- observability

@@ -5,6 +5,7 @@
 
 import re
 import sqlite3
+import time
 from typing import Any
 
 from loguru import logger
@@ -461,19 +462,51 @@ def set_llm_responses(
 
 
 def call_tool(
-    conn: sqlite3.Connection, slug: str, tool_name: str, params: dict[str, Any]
+    conn: sqlite3.Connection,
+    slug: str,
+    tool_name: str,
+    params: dict[str, Any],
+    kind: str = "mcp",
+    actor: str | None = None,
 ) -> Any:
     """Resolve a tool by server slug + tool name and execute it. Used by MCP and the UI."""
-    server = get_server_by_slug(conn, slug)
-    matches = [e for e in store.list_endpoints(conn, server["id"]) if e["tool_name"] == tool_name]
-    if not matches:
-        raise NotFound(f"tool {tool_name!r} not found on server {slug!r}")
-    endpoint = matches[0]
-    dataset = _require_dataset(conn, endpoint["dataset_id"])
+    started = time.perf_counter()
+    status = "ok"
+    response: Any = None
     try:
-        return executor.execute(conn, endpoint, dataset, params)
-    except executor.ExecutorError as exc:
-        raise ServiceError(str(exc), code=exc.code) from exc
+        server = get_server_by_slug(conn, slug)
+        matches = [
+            e for e in store.list_endpoints(conn, server["id"]) if e["tool_name"] == tool_name
+        ]
+        if not matches:
+            raise NotFound(f"tool {tool_name!r} not found on server {slug!r}")
+        endpoint = matches[0]
+        dataset = _require_dataset(conn, endpoint["dataset_id"])
+        try:
+            response = executor.execute(conn, endpoint, dataset, params)
+        except executor.ExecutorError as exc:
+            raise ServiceError(str(exc), code=exc.code) from exc
+        return response
+    except ServiceError as exc:
+        status = exc.code
+        response = {"error": str(exc)}
+        raise
+    except Exception as exc:
+        status = "error"
+        response = {"error": str(exc)}
+        raise
+    finally:
+        store.log_call(
+            conn,
+            kind=kind,
+            status=status,
+            target_slug=slug,
+            tool_name=tool_name,
+            request=params,
+            response=response,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            actor=actor,
+        )
 
 
 # --------------------------------------------------------------------- observability
