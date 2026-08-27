@@ -2,6 +2,7 @@
   "use strict";
 
   var TABS = [
+    ["catalog", "Catalog"],
     ["servers", "Servers"],
     ["datasets", "Datasets"],
     ["endpoints", "Endpoints"],
@@ -14,9 +15,10 @@
 
   var state = {
     user: null,
-    tab: "servers",
+    tab: "catalog",
     loading: false,
     servers: [],
+    catalog: [],
     selectedServerId: null,
     datasets: [],
     selectedDatasetId: null,
@@ -140,8 +142,74 @@
     });
   }
 
+  function openCloneModal(server) {
+    if (!server) return;
+    modalRoot.innerHTML = "<div class=\"modal-backdrop\" role=\"presentation\"><section class=\"modal catalog-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"clone-title\">" +
+      "<div class=\"panel-heading\"><div><h2 id=\"clone-title\">Clone " + esc(server.name) + "</h2><p>Create one live copy of <code>" + esc(server.slug) + "</code>.</p></div></div>" +
+      "<form class=\"form-grid\" data-form=\"clone-server\">" + hidden("source_id", server.id) +
+      "<div class=\"error-inline\" data-clone-error hidden></div>" +
+      input("clone_slug", "New slug", "", "hr-team01") + input("clone_name", "New name (optional)", "", server.name) +
+      "<div class=\"actions\"><button class=\"btn primary\" type=\"submit\"" + disabledIfReadonly() + ">Create clone</button><button class=\"btn\" type=\"button\" data-action=\"close-modal\">Cancel</button></div></form></section></div>";
+  }
+
+  function openBulkCloneModal(server) {
+    if (!server) return;
+    modalRoot.innerHTML = "<div class=\"modal-backdrop\" role=\"presentation\"><section class=\"modal catalog-modal catalog-modal-wide\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"bulk-clone-title\">" +
+      "<div class=\"panel-heading\"><div><h2 id=\"bulk-clone-title\">Bulk clone " + esc(server.name) + "</h2><p>Generate per-team live copies from <code>" + esc(server.slug) + "</code>.</p></div></div>" +
+      "<form class=\"form-grid\" data-form=\"bulk-clone-server\">" + hidden("source_id", server.id) +
+      "<div class=\"callout info\"><strong>Atomic:</strong> if any target slug already exists, the backend returns 409 and nothing is created.</div>" +
+      "<div class=\"error-inline\" data-clone-error hidden></div>" +
+      "<div class=\"inline-grid\"><div class=\"form-row\"><label for=\"bulk_prefix\">Prefix</label><input id=\"bulk_prefix\" name=\"prefix\" value=\"\" placeholder=\"hr-team\" data-bulk-clone-field></div>" +
+      "<div class=\"form-row\"><label for=\"bulk_count\">Count</label><input id=\"bulk_count\" name=\"count\" type=\"number\" min=\"1\" max=\"50\" value=\"20\" data-bulk-clone-field></div></div>" +
+      "<div class=\"form-row\"><label for=\"bulk_start\">Start</label><input id=\"bulk_start\" name=\"start\" type=\"number\" min=\"1\" value=\"1\" data-bulk-clone-field></div>" +
+      "<div class=\"form-row\"><label>Slug preview</label><div class=\"slug-preview\" data-bulk-clone-preview></div></div>" +
+      "<div class=\"actions\"><button class=\"btn primary\" type=\"submit\"" + disabledIfReadonly() + ">Create clones</button><button class=\"btn\" type=\"button\" data-action=\"close-modal\">Cancel</button></div></form></section></div>";
+    updateBulkClonePreview();
+  }
+
+  function generatedBulkCloneSlugs(prefix, count, start) {
+    count = Number.parseInt(count, 10);
+    start = Number.parseInt(start || 1, 10);
+    if (!prefix || !Number.isFinite(count) || !Number.isFinite(start) || count < 1 || start < 1) return [];
+    var end = start + count - 1;
+    var width = Math.max(2, String(end).length);
+    var slugs = [];
+    for (var i = 0; i < count; i += 1) {
+      slugs.push(prefix + String(start + i).padStart(width, "0"));
+    }
+    return slugs;
+  }
+
+  function updateBulkClonePreview() {
+    var form = modalRoot.querySelector("form[data-form='bulk-clone-server']");
+    var preview = modalRoot.querySelector("[data-bulk-clone-preview]");
+    if (!form || !preview) return;
+    var slugs = generatedBulkCloneSlugs(form.elements.prefix.value.trim(), form.elements.count.value, form.elements.start.value);
+    preview.innerHTML = slugs.length ? slugs.map(function (slug) { return "<code>" + esc(slug) + "</code>"; }).join("<span>, </span>") : "<span class=\"help\">Enter a prefix and count to preview target slugs.</span>";
+  }
+
+  function catalogServerById(id) {
+    return state.catalog.find(function (s) { return String(s.id) === String(id); }) || state.servers.find(function (s) { return String(s.id) === String(id); }) || null;
+  }
+
+  function showCloneError(form, message) {
+    var node = form.querySelector("[data-clone-error]");
+    if (!node) return;
+    node.textContent = message;
+    node.hidden = false;
+  }
+
+  function cloneErrorMessage(err, bulk) {
+    if (err.status === 409) return bulk ? "One or more target slugs already exists. Nothing was created." : "That slug is already taken.";
+    if (err.status === 400) return bulk ? "Invalid bulk-clone settings. Count must be 1–50 and the prefix/start must be valid." : "Invalid slug. Use a unique URL-safe slug.";
+    if (err.status === 404) return "Source server was not found.";
+    return err.message || "Clone failed.";
+  }
+
   async function api(path, options) {
-    var opts = options || {};
+    var opts = Object.assign({}, options || {});
+    var silentError = Boolean(opts.silentError);
+    delete opts.silentError;
     opts.credentials = "same-origin";
     opts.headers = opts.headers || {};
     if (opts.body && !opts.headers["Content-Type"]) opts.headers["Content-Type"] = "application/json";
@@ -167,8 +235,11 @@
     if (!response.ok) {
       var detail = data && (data.detail || data.message) ? (data.detail || data.message) : response.statusText;
       if (response.status === 429) detail = "Too many attempts. Wait a minute and try again.";
-      toast(detail, "error");
-      throw new Error(detail);
+      if (!silentError) toast(detail, "error");
+      var error = new Error(detail);
+      error.status = response.status;
+      error.data = data;
+      throw error;
     }
     return data;
   }
@@ -184,9 +255,15 @@
   }
 
   async function loadInitial() {
-    state.servers = await api("/api/servers");
+    var initial = await Promise.all([api("/api/servers"), api("/api/catalog")]);
+    state.servers = initial[0];
+    state.catalog = initial[1] || [];
     if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
     await Promise.all([loadDatasets(), loadEndpoints(), loadLlms()]);
+  }
+
+  async function loadCatalog() {
+    state.catalog = await api("/api/catalog") || [];
   }
 
   async function loadServers() {
@@ -257,6 +334,7 @@
   }
 
   function pageHtml() {
+    if (state.tab === "catalog") return renderCatalog();
     if (state.tab === "servers") return renderServers();
     if (state.tab === "datasets") return renderDatasets();
     if (state.tab === "endpoints") return renderEndpoints();
@@ -277,6 +355,28 @@
     return "<div class=\"toolbar\"><label for=\"server-select\">Server</label><select id=\"server-select\" data-action=\"select-server\">" + state.servers.map(function (s) {
       return "<option value=\"" + s.id + "\"" + (String(s.id) === String(state.selectedServerId) ? " selected" : "") + ">" + esc(s.name) + " (" + esc(s.slug) + ")</option>";
     }).join("") + "</select></div>";
+  }
+
+  function renderCatalog() {
+    return pageHeader("Catalog", "Browse every mock server and clone templates for bootcamp teams.") +
+      "<section class=\"callout info\"><strong>Clone behavior:</strong> datasets, live rows, seed rows, and endpoints are copied. API keys and traffic are not copied. Clones are live immediately at <code>/mock/{slug}</code> and <code>/mcp/{slug}</code>.</section>" +
+      "<section class=\"catalog-grid\">" + (state.catalog.length ? state.catalog.map(catalogCard).join("") : "<div class=\"empty\">No servers yet. Create one in the Servers tab.</div>") + "</section>";
+  }
+
+  function metricCount(value) {
+    return Number.isFinite(Number(value)) ? Number(value) : 0;
+  }
+
+  function authLabel(server) {
+    return server && server.auth_mode === "api_key" ? "API key" : "No auth";
+  }
+
+  function catalogCard(server) {
+    return "<article class=\"card catalog-card\"><div class=\"catalog-card-head\"><div><h3>" + esc(server.name) + "</h3><div class=\"catalog-slug\">" + esc(server.slug) + "</div></div>" +
+      "<div class=\"auth-pill catalog-auth-pill\"><span class=\"auth-option\">" + esc(authLabel(server)) + "</span></div></div>" +
+      "<div class=\"card-desc\">" + esc(server.description || "No description") + "</div>" +
+      "<div class=\"catalog-metrics\"><span class=\"badge\">" + esc(metricCount(server.dataset_count)) + " datasets</span><span class=\"badge\">" + esc(metricCount(server.endpoint_count)) + " tools</span><span class=\"badge neutral\">" + esc(metricCount(server.row_count)) + " rows</span></div>" +
+      "<div class=\"actions\"><button class=\"btn small\" data-action=\"clone-server\" data-id=\"" + esc(server.id) + "\"" + disabledIfReadonly() + ">Clone</button><button class=\"btn small primary\" data-action=\"bulk-clone-server\" data-id=\"" + esc(server.id) + "\"" + disabledIfReadonly() + ">Bulk clone</button></div></article>";
   }
 
   function renderServers() {
@@ -789,6 +889,7 @@
       state.testSearch = event.target.value;
       applyToolSearch();
     }
+    if (event.target.matches("[data-bulk-clone-field]")) updateBulkClonePreview();
     if (event.target.matches("form[data-form='endpoint'] input[name='path']")) updateToolTypePreview();
     if (event.target.matches("form[data-form='dataset'] textarea, form[data-form='dataset'] select")) updateDatasetPreview();
   });
@@ -826,6 +927,8 @@
     try {
       if (form.dataset.form === "login") await submitLogin(form);
       if (form.dataset.form === "server") await submitServer(form);
+      if (form.dataset.form === "clone-server") await submitClone(form);
+      if (form.dataset.form === "bulk-clone-server") await submitBulkClone(form);
       if (form.dataset.form === "dataset") await submitDataset(form);
       if (form.dataset.form === "dataset-meta") await submitDatasetMeta(form);
       if (form.dataset.form === "rows") await submitRows(form);
@@ -848,6 +951,9 @@
     var action = button.dataset.action;
     try {
       if (action === "logout") { await api("/api/auth/logout", { method: "POST" }); state.user = null; renderLogin(); }
+      if (action === "close-modal") { modalRoot.innerHTML = ""; return; }
+      if (action === "clone-server") openCloneModal(catalogServerById(button.dataset.id));
+      if (action === "bulk-clone-server") openBulkCloneModal(catalogServerById(button.dataset.id));
       if (action === "edit-server") { state.editingServerId = Number(button.dataset.id); render(); }
       if (action === "cancel-server-edit") { state.editingServerId = null; render(); }
       if (action === "delete-server") await deleteItem("server", button.dataset.id, button.dataset.name, "/api/servers/" + button.dataset.id, async function () { await loadServers(); await refreshForServer(); });
@@ -902,6 +1008,43 @@
     await loadServers();
     render();
     toast("Server saved.", "ok");
+  }
+
+  async function submitClone(form) {
+    var data = formData(form);
+    var payload = { slug: (data.clone_slug || "").trim() };
+    if ((data.clone_name || "").trim()) payload.name = data.clone_name.trim();
+    try {
+      await api("/api/servers/" + encodeURIComponent(data.source_id) + "/clone", { method: "POST", body: JSON.stringify(payload), silentError: true });
+      await loadServers();
+      await loadCatalog();
+      await refreshForServer();
+      modalRoot.innerHTML = "";
+      render();
+      toast("Server cloned.", "ok");
+    } catch (err) {
+      showCloneError(form, cloneErrorMessage(err, false));
+    }
+  }
+
+  async function submitBulkClone(form) {
+    var data = formData(form);
+    var payload = {
+      prefix: (data.prefix || "").trim(),
+      count: Number.parseInt(data.count, 10),
+      start: Number.parseInt(data.start || 1, 10)
+    };
+    try {
+      await api("/api/servers/" + encodeURIComponent(data.source_id) + "/bulk-clone", { method: "POST", body: JSON.stringify(payload), silentError: true });
+      await loadServers();
+      await loadCatalog();
+      await refreshForServer();
+      modalRoot.innerHTML = "";
+      render();
+      toast("Servers cloned.", "ok");
+    } catch (err) {
+      showCloneError(form, cloneErrorMessage(err, true));
+    }
   }
 
   async function submitDataset(form) {
@@ -1105,6 +1248,7 @@
     if (!tab) return;
     state.tab = tab.dataset.tab;
     try {
+      if (state.tab === "catalog") await loadCatalog();
       if (state.tab === "datasets") await loadDatasets();
       if (state.tab === "endpoints") await refreshForServer();
       if (state.tab === "llm") await loadLlms();
