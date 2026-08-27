@@ -118,9 +118,37 @@ API keys are global, not per-server. The `api_key` table has no `server_id` colu
 | `GET /api/traffic/summary` | `200` bare JSON list grouped by `target_slug`, with `call_count`, `ok_count`, `error_count`, `avg_duration_ms`, and `last_call_at`, ordered by call count descending. |
 | `POST /api/servers/reset-all-to-seed` | `200` reset summary. Body is optional; bodyless resets all servers. Use `{"prefix": "hr-team"}` to reset only matching slugs. |
 
+### Multi-table datasets and relationships
+
+Datasets stay flat JSON row collections. A relationship is metadata that links a field on one dataset to a field on another, so callers can inline related rows at query time with the `expand` query parameter. Relationships are declared per server on the **Datasets** tab.
+
+Relationships are advisory. They do not enforce foreign keys in SQLite, they do not cascade, and they do not block writes that break a link. A missing parent resolves to `null`; a childless parent resolves to `[]`.
+
+Rules:
+
+- `expand` works on read operations only. `create`, `update`, and `delete` with `expand` return `400`.
+- Depth is one level. A dotted name such as `order.customer` returns `400`.
+- At most 5 expand names per request. Repeats are deduplicated.
+- `summary_fields` projection is preserved; expanded keys are merged on top of it.
+- A forward expand returns an object or `null`. An inverse expand returns an array.
+- `expand`, `limit`, `offset`, and `_row_id` are reserved and cannot be used as expand names.
+
+| Endpoint | Body | Result |
+|---|---|---|
+| `GET /api/servers/{server_id}/relationships` | none | `200` list of relationships for the server. |
+| `GET /api/servers/{server_id}/relationships/validate` | none | `200` `{"ok": bool, "relationship_count": N, "issues": [...]}`. Never raises; orphan rows surface as issues. |
+| `POST /api/servers/{server_id}/relationships` | `{"name", "source_dataset_id", "source_field", "target_dataset_id", "target_field", "relation_type", "expand_name", "inverse_expand_name", "required", "description"}` | `201` with the relationship; `409` on a duplicate expand name; `400` on a cross-server dataset, a reserved name, or a bad relation type. |
+| `DELETE /api/relationships/{relationship_id}` | none | `204`; `404` if it does not exist. |
+| `POST /api/relationships/ensure-demo` | `{"server_id": N}` optional | `200` `{"servers_touched", "relationships_created", "skipped_existing"}`. Idempotent. |
+| `GET /api/datasets/{dataset_id}/expands` | none | `200` list of available expand names with `direction`, `returns`, and the target dataset. |
+
+`relation_type` is `many_to_one` or `one_to_one`. Self-references are allowed. The same five operations are exposed as management MCP tools.
+
+Example: `GET /mock/contoso-orders/order-lines?expand=order` inlines the parent order into every line. `GET /mock/contoso-orders/orders/1001?expand=lines` inlines the line array into the order.
+
 ## Seeded sample servers
 
-First boot seeds 5 servers, 15 datasets, 42 endpoints, and 1 mock LLM endpoint. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
+First boot seeds 5 servers, 15 datasets, 42 endpoints, 12 relationships, and 1 mock LLM endpoint. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
 
 | Slug | Name | Datasets | Tools | Rows |
 |---|---|---|---|---|
@@ -173,11 +201,11 @@ See **[COPILOT-STUDIO.md](COPILOT-STUDIO.md)** for the full runbook covering bot
 
 ## Management MCP server
 
-`/mcp/_admin` is a second FastMCP server that exposes **36 tools** mirroring the admin REST API. It lets an LLM agent drive the entire playground — create servers, clone team servers, load datasets, define endpoints, adjust LLM responses, and inspect traffic — without a human touching the web UI.
+`/mcp/_admin` is a second FastMCP server that exposes **41 tools** mirroring the admin REST API. It lets an LLM agent drive the entire playground — create servers, clone team servers, load datasets, define endpoints, adjust LLM responses, and inspect traffic — without a human touching the web UI.
 
 Authentication: API key with `admin` scope, passed as `X-API-Key: <key>` or `Authorization: Bearer <key>`.
 
-Tools are grouped into six areas:
+Tools are grouped into seven areas:
 
 | Area | Tools |
 |---|---|
@@ -185,6 +213,7 @@ Tools are grouped into six areas:
 | Datasets | `list_datasets`, `get_dataset`, `create_dataset`, `update_dataset`, `delete_dataset` |
 | Dataset rows | `list_rows`, `replace_rows`, `add_rows`, `reset_to_seed`, `reset_all_to_seed`, `save_as_seed` |
 | Endpoints | `list_endpoints`, `get_endpoint`, `create_endpoint`, `update_endpoint`, `delete_endpoint` |
+| Relationships | `list_relationships`, `create_relationship`, `delete_relationship`, `validate_relationships`, `ensure_demo_relationships` |
 | LLM endpoints | `list_llm_endpoints`, `get_llm_endpoint`, `create_llm_endpoint`, `update_llm_endpoint`, `delete_llm_endpoint`, `set_llm_responses` |
 | Misc | `call_tool`, `get_cohort`, `get_traffic`, `get_traffic_summary`, `clear_traffic` |
 

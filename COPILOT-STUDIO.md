@@ -50,13 +50,13 @@ Set `PUBLIC_BASE_URL` to the URL trainees can actually reach before exporting ha
 | `GET /api/traffic/summary` | `200` per-slug traffic summary with `call_count`, `ok_count`, `error_count`, `avg_duration_ms`, and `last_call_at`. |
 | `POST /api/servers/reset-all-to-seed` | Body is optional. Bodyless resets all servers; `{"prefix": "hr-team"}` resets matching slugs only. |
 
-The admin management MCP server at `/mcp/_admin` exposes 36 tools. The bootcamp tools are `get_cohort`, `get_traffic_summary`, and `reset_all_to_seed`; `reset_all_to_seed` requires `confirm=true` or it returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
+The admin management MCP server at `/mcp/_admin` exposes 41 tools. The bootcamp tools are `get_cohort`, `get_traffic_summary`, and `reset_all_to_seed`; `reset_all_to_seed` requires `confirm=true` or it returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
 
 ---
 
 ## Seeded sample servers
 
-First boot creates 5 servers, 15 datasets, 42 endpoints, and 1 mock LLM endpoint. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
+First boot creates 5 servers, 15 datasets, 42 endpoints, 12 relationships, and 1 mock LLM endpoint. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
 
 | Slug | Name | Datasets | Tools | Rows |
 |------|------|----------|-------|------|
@@ -227,6 +227,35 @@ Status codes:
 | Bad input | `400` |
 
 Error responses always have the shape `{"detail": "<message>"}`.
+
+---
+
+### About `expand` and relationships
+
+If a server declares relationships, every read operation gains an optional `expand` query parameter that inlines related rows into the response.
+
+In the Swagger export, `expand` is a plain query-string parameter with `x-ms-summary: "Expand"`. **The response schema stays flat.** There is no `ExpandedItem` definition and no recursive `$ref`, because Power Platform's connector designer handles recursive schemas badly and would produce an unusable connector.
+
+What that means in practice:
+
+- Power Platform sees the base record shape. The expanded key arrives at runtime as an extra, untyped property.
+- Dynamic content in Copilot Studio and Power Automate will **not** offer the expanded fields by name. Reference them with an expression against the raw response instead.
+- If a flow needs typed access to the related record, call the related collection with its own operation rather than relying on `expand`.
+
+Rules enforced by the server:
+
+| Situation | Result |
+|-----------|--------|
+| `expand` on a list, search, or get | `200` with related rows inlined |
+| `expand` on create, update, or delete | `400` `expand is not supported on <create\|update\|delete> operations` |
+| Unknown expand name | `400` with the list of valid names |
+| Dotted name such as `order.customer` | `400` — depth is one level only |
+| More than 5 expand names | `400` |
+| Repeated `?expand=x&expand=x` | `200`, deduplicated |
+
+Example: `GET /mock/contoso-orders/order-lines?expand=order` inlines the parent order object into each line. `GET /mock/contoso-orders/orders/1001?expand=lines` inlines the array of lines into the order.
+
+Relationships are advisory metadata, not database foreign keys. A missing parent inlines as `null`; a parent with no children inlines as `[]`.
 
 ---
 
