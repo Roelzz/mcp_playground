@@ -127,7 +127,7 @@ First boot seeds 5 servers, 15 datasets, 42 endpoints, and 1 mock LLM endpoint. 
 | `contoso-orders` | Contoso Orders | 2 | 7 | 160 |
 | `northwind-hris` | Northwind HRIS | 3 | 9 | 64 |
 | `fabrikam-it-service` | Fabrikam IT Service Desk | 3 | 8 | 56 |
-| `adatum-crm` | Datum Sales CRM | 3 | 9 | 76 |
+| `adatum-crm` | Adatum Sales CRM | 3 | 9 | 76 |
 | `contoso-expenses` | Contoso Travel Expenses | 4 | 9 | 116 |
 
 Dataset row totals: `contoso-orders` has `orders` 40 / `order_lines` 120; `northwind-hris` has `employees` 30 / `time_off_requests` 28 / `org_units` 6; `fabrikam-it-service` has `tickets` 30 / `assets` 18 / `service_catalog` 8; `adatum-crm` has `accounts` 20 / `contacts` 30 / `opportunities` 26; `contoso-expenses` has `expense_reports` 24 / `expense_lines` 60 / `cost_centres` 8 / `approvals` 24.

@@ -134,9 +134,7 @@ def test_endpoint_dataset_must_belong_to_same_server(conn) -> None:
 
 
 @pytest.mark.parametrize(("method", "path"), [("POST", "/orders/{id}"), ("DELETE", "/orders")])
-def test_unclassifiable_endpoint_shapes_raise_service_error(
-    conn, method: str, path: str
-) -> None:
+def test_unclassifiable_endpoint_shapes_raise_service_error(conn, method: str, path: str) -> None:
     server = _create_server(conn)
     dataset = _create_dataset(conn, server["id"])
 
@@ -159,9 +157,7 @@ def test_unclassifiable_endpoint_shapes_raise_service_error(
         ("DELETE", "/orders/{id}", "delete"),
     ],
 )
-def test_create_endpoint_infers_tool_type(
-    conn, method: str, path: str, expected: str
-) -> None:
+def test_create_endpoint_infers_tool_type(conn, method: str, path: str, expected: str) -> None:
     server = _create_server(conn)
     dataset = _create_dataset(conn, server["id"])
     endpoint = _create_endpoint(
@@ -177,9 +173,7 @@ def test_create_endpoint_infers_tool_type(
 
 
 @pytest.mark.parametrize(("method", "path"), [("GET", "/orders/{id}"), ("POST", "/orders")])
-def test_summary_fields_only_allowed_on_list_and_search(
-    conn, method: str, path: str
-) -> None:
+def test_summary_fields_only_allowed_on_list_and_search(conn, method: str, path: str) -> None:
     server = _create_server(conn)
     dataset = _create_dataset(conn, server["id"])
 

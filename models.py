@@ -87,3 +87,19 @@ class LLMEndpointUpdate(BaseModel):
     upstream_deployment: str | None = None
     system_prompt: str | None = None
     auth_mode: AuthMode | None = None
+
+
+RelationType = Literal["many_to_one", "one_to_one"]
+
+
+class RelationshipCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    source_dataset_id: int
+    source_field: str = Field(min_length=1)
+    target_dataset_id: int
+    target_field: str = Field(min_length=1)
+    relation_type: RelationType = "many_to_one"
+    expand_name: str = Field(min_length=1)
+    inverse_expand_name: str | None = None
+    required: bool = False
+    description: str | None = None

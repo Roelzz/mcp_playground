@@ -248,15 +248,11 @@ def _replace_rows(
     return _call_service(service.replace_rows, conn, dataset_id, rows)
 
 
-def _add_rows(
-    conn: sqlite3.Connection, dataset_id: int, rows: list[dict[str, Any]]
-) -> Any:
+def _add_rows(conn: sqlite3.Connection, dataset_id: int, rows: list[dict[str, Any]]) -> Any:
     return _call_service(service.add_rows, conn, dataset_id, rows)
 
 
-def _reset_to_seed(
-    conn: sqlite3.Connection, dataset_id: int, confirm: bool = False
-) -> Any:
+def _reset_to_seed(conn: sqlite3.Connection, dataset_id: int, confirm: bool = False) -> Any:
     if not confirm:
         return _confirm_required(f"live rows in dataset {dataset_id}")
     return _call_service(service.reset_to_seed, conn, dataset_id)
@@ -271,9 +267,7 @@ def _reset_all_to_seed(
     return _call_service(service.reset_all_to_seed, conn, prefix)
 
 
-def _save_as_seed(
-    conn: sqlite3.Connection, dataset_id: int, confirm: bool = False
-) -> Any:
+def _save_as_seed(conn: sqlite3.Connection, dataset_id: int, confirm: bool = False) -> Any:
     if not confirm:
         return _confirm_required(f"seed snapshot for dataset {dataset_id}")
     return _call_service(service.save_as_seed, conn, dataset_id)
@@ -393,9 +387,7 @@ def _call_tool(
     return _call_service(service.call_tool, conn, slug, tool_name, params or {})
 
 
-def _get_traffic(
-    conn: sqlite3.Connection, target_slug: str | None = None, limit: int = 100
-) -> Any:
+def _get_traffic(conn: sqlite3.Connection, target_slug: str | None = None, limit: int = 100) -> Any:
     return _call_service(service.get_traffic, conn, target_slug, limit)
 
 
@@ -410,6 +402,56 @@ def _clear_traffic(conn: sqlite3.Connection, confirm: bool = False) -> dict[str,
     if _is_error(result):
         return result
     return _ok(cleared=True)
+
+
+def _list_relationships(conn: sqlite3.Connection, server_id: int) -> Any:
+    return _call_service(service.list_relationships, conn, server_id)
+
+
+def _create_relationship(
+    conn: sqlite3.Connection,
+    server_id: int,
+    name: str,
+    source_dataset_id: int,
+    source_field: str,
+    target_dataset_id: int,
+    target_field: str,
+    expand_name: str,
+    inverse_expand_name: str | None = None,
+    relation_type: str = "many_to_one",
+    required: bool = False,
+    description: str | None = None,
+) -> Any:
+    return _call_service(
+        service.create_relationship,
+        conn,
+        server_id,
+        name=name,
+        source_dataset_id=source_dataset_id,
+        source_field=source_field,
+        target_dataset_id=target_dataset_id,
+        target_field=target_field,
+        expand_name=expand_name,
+        inverse_expand_name=inverse_expand_name,
+        relation_type=relation_type,
+        required=required,
+        description=description,
+    )
+
+
+def _delete_relationship(conn: sqlite3.Connection, relationship_id: int) -> Any:
+    result = _call_service(service.delete_relationship, conn, relationship_id)
+    if _is_error(result):
+        return result
+    return _ok(deleted=True)
+
+
+def _validate_relationships(conn: sqlite3.Connection, server_id: int) -> Any:
+    return _call_service(service.validate_relationships, conn, server_id)
+
+
+def _ensure_demo_relationships(conn: sqlite3.Connection, server_id: int | None = None) -> Any:
+    return _call_service(service.ensure_demo_relationships, conn, server_id)
 
 
 TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
@@ -714,6 +756,61 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
         "Clear all recorded traffic logs when confirmed.",
         [_param("confirm", bool, "Set true to clear all traffic logs.", False)],
         _clear_traffic,
+    ),
+    (
+        "list_relationships",
+        "List all dataset relationships for a server.",
+        [_param("server_id", int, "Server ID.")],
+        _list_relationships,
+    ),
+    (
+        "create_relationship",
+        "Create a dataset relationship linking a source field to a target dataset field.",
+        [
+            _param("server_id", int, "Server ID."),
+            _param("name", str, "Unique name for the relationship within the server."),
+            _param("source_dataset_id", int, "ID of the source dataset."),
+            _param("source_field", str, "Field name in the source dataset."),
+            _param("target_dataset_id", int, "ID of the target dataset."),
+            _param("target_field", str, "Field name in the target dataset."),
+            _param("expand_name", str, "Name used to expand this relationship on source rows."),
+            _param(
+                "inverse_expand_name",
+                str | None,
+                "Name for inverse expand on target rows.",
+                None,
+            ),
+            _param(
+                "relation_type",
+                str,
+                "Relationship type: many_to_one or one_to_one.",
+                "many_to_one",
+            ),
+            _param("required", bool, "Whether the source field is required.", False),
+            _param("description", str | None, "Optional description.", None),
+        ],
+        _create_relationship,
+    ),
+    (
+        "delete_relationship",
+        "Delete a dataset relationship by ID.",
+        [_param("relationship_id", int, "Relationship ID.")],
+        _delete_relationship,
+    ),
+    (
+        "validate_relationships",
+        "Validate all dataset relationships for a server and return a health report.",
+        [_param("server_id", int, "Server ID.")],
+        _validate_relationships,
+    ),
+    (
+        "ensure_demo_relationships",
+        (
+            "Idempotently create demo relationships for seeded servers."
+            " Pass server_id to scope to one server."
+        ),
+        [_param("server_id", int | None, "Server ID, or null for all servers.", None)],
+        _ensure_demo_relationships,
     ),
 ]
 

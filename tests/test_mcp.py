@@ -135,7 +135,9 @@ def test_missing_row_raises(conn: sqlite3.Connection) -> None:
 
 
 def test_tools_reflect_endpoint_changes_without_restart(conn: sqlite3.Connection) -> None:
-    server_id = int(service.list_servers(conn)[0]["id"])
+    server_id = int(
+        next(s for s in service.list_servers(conn) if s["slug"] == "contoso-orders")["id"]
+    )
     endpoint = next(
         e for e in service.list_endpoints(conn, server_id) if e["tool_name"] == "delete_order"
     )

@@ -91,9 +91,7 @@ def playground(conn: sqlite3.Connection) -> dict[str, Any]:
             conn, server_id, dataset_id, "/orders/search", "GET", "search_orders"
         ),
         "get": _create_endpoint(conn, server_id, dataset_id, "/orders/{id}", "GET", "get_order"),
-        "create": _create_endpoint(
-            conn, server_id, dataset_id, "/orders", "POST", "create_order"
-        ),
+        "create": _create_endpoint(conn, server_id, dataset_id, "/orders", "POST", "create_order"),
         "update": _create_endpoint(
             conn, server_id, dataset_id, "/orders/{id}", "PUT", "update_order"
         ),
@@ -434,9 +432,7 @@ def test_create_accepts_any_field_on_empty_dataset(conn: sqlite3.Connection) -> 
     assert row == {"whatever": "goes", "shape": "free", "id": 1}
 
 
-def test_update_rejects_unknown_field(
-    playground: dict[str, Any], conn: sqlite3.Connection
-) -> None:
+def test_update_rejects_unknown_field(playground: dict[str, Any], conn: sqlite3.Connection) -> None:
     with pytest.raises(ExecutorError) as excinfo:
         execute(
             conn,

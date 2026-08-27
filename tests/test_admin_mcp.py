@@ -48,6 +48,11 @@ EXPECTED_TOOL_NAMES = {
     "get_traffic",
     "get_traffic_summary",
     "clear_traffic",
+    "list_relationships",
+    "create_relationship",
+    "delete_relationship",
+    "validate_relationships",
+    "ensure_demo_relationships",
 }
 
 ALLOWED_GAPS = {
@@ -55,6 +60,11 @@ ALLOWED_GAPS = {
     "get_server_by_slug",
     # Slug lookup is internal plumbing; admins manage LLM endpoints by ID through this MCP surface.
     "get_llm_endpoint_by_slug",
+    # Relationship helpers used internally by API and Phase 4; not exposed as separate admin tools.
+    "get_relationship",
+    "parse_expand",
+    "available_expands",
+    "expand_rows",
 }
 
 
@@ -170,9 +180,7 @@ def test_destructive_tools_refuse_without_confirm_and_succeed(
     server = _create_server(tools, "replace-rows")
     dataset = _create_dataset(tools, int(server["id"]), rows=[{"id": 1}])
     _assert_confirm_refused(tools["replace_rows"].fn(dataset_id=dataset["id"], rows=[{"id": 2}]))
-    replaced = tools["replace_rows"].fn(
-        dataset_id=dataset["id"], rows=[{"id": 2}], confirm=True
-    )
+    replaced = tools["replace_rows"].fn(dataset_id=dataset["id"], rows=[{"id": 2}], confirm=True)
     assert replaced["row_count"] == 1
     assert tools["list_rows"].fn(dataset_id=dataset["id"])[0]["id"] == 2
 

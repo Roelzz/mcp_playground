@@ -163,6 +163,32 @@ def _clone_server_rows(
             endpoint["summary_fields"],
         )
 
+    for rel in store.list_relationships(conn, int(source["id"])):
+        src_id = int(rel["source_dataset_id"])
+        tgt_id = int(rel["target_dataset_id"])
+        if src_id not in dataset_map:
+            raise ServiceError(
+                f"relationship {rel['name']!r} source dataset {src_id} not in clone map"
+            )
+        if tgt_id not in dataset_map:
+            raise ServiceError(
+                f"relationship {rel['name']!r} target dataset {tgt_id} not in clone map"
+            )
+        store.create_relationship(
+            conn,
+            new_server_id,
+            name=rel["name"],
+            source_dataset_id=dataset_map[src_id],
+            source_field=rel["source_field"],
+            target_dataset_id=dataset_map[tgt_id],
+            target_field=rel["target_field"],
+            relation_type=rel["relation_type"],
+            expand_name=rel["expand_name"],
+            inverse_expand_name=rel["inverse_expand_name"],
+            required=rel["required"],
+            description=rel["description"],
+        )
+
     return new_server_id
 
 
@@ -563,9 +589,7 @@ def create_endpoint(
     if dataset_id is None:
         raise ServiceError("dataset_id is required")
     summary_fields = summary_fields or []
-    tool_type = _validate_endpoint_shape(
-        conn, server_id, path, method, dataset_id, summary_fields
-    )
+    tool_type = _validate_endpoint_shape(conn, server_id, path, method, dataset_id, summary_fields)
     existing = [e for e in store.list_endpoints(conn, server_id) if e["tool_name"] == tool_name]
     if existing:
         raise Conflict(f"tool_name {tool_name!r} already exists on this server")
@@ -790,3 +814,550 @@ def get_traffic_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def clear_traffic(conn: sqlite3.Connection) -> None:
     with transaction(conn):
         store.clear_traffic(conn)
+
+
+# --- relationships -----------------------------------------------------------
+
+_RESERVED_EXPAND = {"expand", "limit", "offset", "_row_id"}
+
+_DEMO_RELATIONSHIPS: dict[frozenset[str], list[dict[str, Any]]] = {
+    frozenset({"orders", "order_lines"}): [
+        {
+            "name": "order_lines_to_orders",
+            "source_key": "order_lines",
+            "source_field": "order_id",
+            "target_key": "orders",
+            "target_field": "id",
+            "expand_name": "order",
+            "inverse_expand_name": "lines",
+        },
+    ],
+    frozenset({"employees", "time_off_requests", "org_units"}): [
+        {
+            "name": "employees_manager",
+            "source_key": "employees",
+            "source_field": "manager_id",
+            "target_key": "employees",
+            "target_field": "employee_id",
+            "expand_name": "manager",
+            "inverse_expand_name": "direct_reports",
+        },
+        {
+            "name": "employees_org_unit",
+            "source_key": "employees",
+            "source_field": "department",
+            "target_key": "org_units",
+            "target_field": "name",
+            "expand_name": "org_unit",
+            "inverse_expand_name": "employees",
+        },
+        {
+            "name": "time_off_requests_to_employees",
+            "source_key": "time_off_requests",
+            "source_field": "employee_id",
+            "target_key": "employees",
+            "target_field": "employee_id",
+            "expand_name": "employee",
+            "inverse_expand_name": "time_off_requests",
+        },
+    ],
+    frozenset({"tickets", "assets", "service_catalog"}): [
+        {
+            "name": "tickets_to_assets",
+            "source_key": "tickets",
+            "source_field": "asset_tag",
+            "target_key": "assets",
+            "target_field": "asset_tag",
+            "expand_name": "asset",
+            "inverse_expand_name": "tickets",
+        },
+        {
+            "name": "tickets_to_service_catalog",
+            "source_key": "tickets",
+            "source_field": "service_id",
+            "target_key": "service_catalog",
+            "target_field": "service_id",
+            "expand_name": "service",
+            "inverse_expand_name": "tickets",
+        },
+    ],
+    frozenset({"accounts", "contacts", "opportunities"}): [
+        {
+            "name": "contacts_to_accounts",
+            "source_key": "contacts",
+            "source_field": "account_id",
+            "target_key": "accounts",
+            "target_field": "account_id",
+            "expand_name": "account",
+            "inverse_expand_name": "contacts",
+        },
+        {
+            "name": "opportunities_to_accounts",
+            "source_key": "opportunities",
+            "source_field": "account_id",
+            "target_key": "accounts",
+            "target_field": "account_id",
+            "expand_name": "account",
+            "inverse_expand_name": "opportunities",
+        },
+        {
+            "name": "opportunities_to_contacts",
+            "source_key": "opportunities",
+            "source_field": "primary_contact_id",
+            "target_key": "contacts",
+            "target_field": "contact_id",
+            "expand_name": "primary_contact",
+            "inverse_expand_name": "opportunities",
+        },
+    ],
+    frozenset({"expense_reports", "expense_lines", "cost_centres", "approvals"}): [
+        {
+            "name": "expense_lines_to_reports",
+            "source_key": "expense_lines",
+            "source_field": "report_id",
+            "target_key": "expense_reports",
+            "target_field": "report_id",
+            "expand_name": "report",
+            "inverse_expand_name": "lines",
+        },
+        {
+            "name": "expense_reports_to_cost_centres",
+            "source_key": "expense_reports",
+            "source_field": "cost_center_id",
+            "target_key": "cost_centres",
+            "target_field": "cost_center_id",
+            "expand_name": "cost_centre",
+            "inverse_expand_name": "reports",
+        },
+        {
+            "name": "approvals_to_reports",
+            "source_key": "approvals",
+            "source_field": "report_id",
+            "target_key": "expense_reports",
+            "target_field": "report_id",
+            "expand_name": "report",
+            "inverse_expand_name": "approvals",
+        },
+    ],
+}
+
+
+def _require_relationship(conn: sqlite3.Connection, relationship_id: int) -> dict[str, Any]:
+    rel = store.get_relationship(conn, relationship_id)
+    if rel is None:
+        raise NotFound(f"relationship {relationship_id} not found")
+    return rel
+
+
+def list_relationships(conn: sqlite3.Connection, server_id: int) -> list[dict[str, Any]]:
+    _require_server(conn, server_id)
+    return store.list_relationships(conn, server_id)
+
+
+def get_relationship(conn: sqlite3.Connection, relationship_id: int) -> dict[str, Any]:
+    return _require_relationship(conn, relationship_id)
+
+
+def create_relationship(conn: sqlite3.Connection, server_id: int, **fields: Any) -> dict[str, Any]:
+    source_field = str(fields.get("source_field", "") or "").strip()
+    target_field = str(fields.get("target_field", "") or "").strip()
+    expand_name = str(fields.get("expand_name", "") or "").strip()
+    inverse_expand_name = fields.get("inverse_expand_name")
+    if inverse_expand_name is not None:
+        inverse_expand_name = str(inverse_expand_name).strip() or None
+
+    if not source_field:
+        raise ServiceError("source_field must not be empty")
+    if not target_field:
+        raise ServiceError("target_field must not be empty")
+    if not expand_name:
+        raise ServiceError("expand_name must not be empty")
+
+    relation_type = fields.get("relation_type", "many_to_one")
+    if relation_type not in {"many_to_one", "one_to_one"}:
+        raise ServiceError(
+            f"relation_type must be 'many_to_one' or 'one_to_one', got {relation_type!r}"
+        )
+
+    if expand_name in _RESERVED_EXPAND:
+        raise ServiceError(f"expand_name {expand_name!r} is reserved: {sorted(_RESERVED_EXPAND)}")
+    if inverse_expand_name is not None and inverse_expand_name in _RESERVED_EXPAND:
+        raise ServiceError(
+            f"inverse_expand_name {inverse_expand_name!r} is reserved: {sorted(_RESERVED_EXPAND)}"
+        )
+
+    src_dataset = store.get_dataset(conn, int(fields["source_dataset_id"]))
+    if src_dataset is None:
+        raise NotFound(f"source dataset {fields['source_dataset_id']} not found")
+    if int(src_dataset["server_id"]) != server_id:
+        raise ServiceError(
+            f"source dataset {fields['source_dataset_id']} belongs to"
+            f" server {src_dataset['server_id']}, not {server_id}"
+        )
+
+    tgt_dataset = store.get_dataset(conn, int(fields["target_dataset_id"]))
+    if tgt_dataset is None:
+        raise NotFound(f"target dataset {fields['target_dataset_id']} not found")
+    if int(tgt_dataset["server_id"]) != server_id:
+        raise ServiceError(
+            f"target dataset {fields['target_dataset_id']} belongs to"
+            f" server {tgt_dataset['server_id']}, not {server_id}"
+        )
+
+    name = str(fields.get("name", "") or "").strip()
+    existing = store.list_relationships(conn, server_id)
+    for rel in existing:
+        if rel["name"] == name:
+            raise Conflict(f"relationship name {name!r} already exists on server {server_id}")
+        if (
+            rel["source_dataset_id"] == int(fields["source_dataset_id"])
+            and rel["expand_name"] == expand_name
+        ):
+            raise Conflict(
+                f"expand_name {expand_name!r} already used on source"
+                f" dataset {fields['source_dataset_id']}"
+            )
+        if (
+            inverse_expand_name is not None
+            and rel["target_dataset_id"] == int(fields["target_dataset_id"])
+            and rel["inverse_expand_name"] == inverse_expand_name
+        ):
+            raise Conflict(
+                f"inverse_expand_name {inverse_expand_name!r} already used on"
+                f" target dataset {fields['target_dataset_id']}"
+            )
+
+    with transaction(conn):
+        rel_id = store.create_relationship(
+            conn,
+            server_id,
+            name=name,
+            source_dataset_id=int(fields["source_dataset_id"]),
+            source_field=source_field,
+            target_dataset_id=int(fields["target_dataset_id"]),
+            target_field=target_field,
+            relation_type=relation_type,
+            expand_name=expand_name,
+            inverse_expand_name=inverse_expand_name,
+            required=bool(fields.get("required", False)),
+            description=fields.get("description"),
+        )
+    return _require_relationship(conn, rel_id)
+
+
+def delete_relationship(conn: sqlite3.Connection, relationship_id: int) -> None:
+    _require_relationship(conn, relationship_id)
+    with transaction(conn):
+        store.delete_relationship(conn, relationship_id)
+
+
+def validate_relationships(conn: sqlite3.Connection, server_id: int) -> dict[str, Any]:
+    _require_server(conn, server_id)
+    rels = store.list_relationships(conn, server_id)
+    issues: list[dict[str, Any]] = []
+
+    for rel in rels:
+        tgt_dataset = store.get_dataset(conn, int(rel["target_dataset_id"]))
+        if tgt_dataset is None:
+            issues.append(
+                {
+                    "relationship_id": rel["id"],
+                    "name": rel["name"],
+                    "severity": "error",
+                    "message": f"target dataset {rel['target_dataset_id']} no longer exists",
+                }
+            )
+            continue
+
+        src_dataset = store.get_dataset(conn, int(rel["source_dataset_id"]))
+        if src_dataset is None:
+            issues.append(
+                {
+                    "relationship_id": rel["id"],
+                    "name": rel["name"],
+                    "severity": "error",
+                    "message": f"source dataset {rel['source_dataset_id']} no longer exists",
+                }
+            )
+            continue
+
+        tgt_rows = store.list_rows(conn, int(rel["target_dataset_id"]))
+        src_rows = store.list_rows(conn, int(rel["source_dataset_id"]))
+        target_field = rel["target_field"]
+        source_field = rel["source_field"]
+
+        if tgt_rows and target_field not in tgt_rows[0]:
+            issues.append(
+                {
+                    "relationship_id": rel["id"],
+                    "name": rel["name"],
+                    "severity": "warning",
+                    "message": f"target field {target_field!r} not found in target dataset rows",
+                }
+            )
+
+        target_values = {str(r[target_field]) for r in tgt_rows if target_field in r}
+        orphan_count = 0
+        null_count = 0
+        for row in src_rows:
+            val = row.get(source_field)
+            if val is None:
+                if rel["required"]:
+                    null_count += 1
+            elif str(val) not in target_values:
+                orphan_count += 1
+
+        if orphan_count > 0:
+            issues.append(
+                {
+                    "relationship_id": rel["id"],
+                    "name": rel["name"],
+                    "severity": "warning",
+                    "message": (
+                        f"{orphan_count} source row(s) have {source_field!r}"
+                        " values not found in target"
+                    ),
+                }
+            )
+        if null_count > 0:
+            issues.append(
+                {
+                    "relationship_id": rel["id"],
+                    "name": rel["name"],
+                    "severity": "warning",
+                    "message": (
+                        f"{null_count} source row(s) have null {source_field!r}"
+                        " but relationship is required"
+                    ),
+                }
+            )
+
+    return {
+        "ok": not any(i["severity"] == "error" for i in issues),
+        "relationship_count": len(rels),
+        "issues": issues,
+    }
+
+
+# --- expand helpers -----------------------------------------------------------
+
+
+def parse_expand(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        names = value
+    else:
+        names = [v.strip() for v in value.split(",")]
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in names:
+        name = name.strip()
+        if not name:
+            raise ServiceError("expand name must not be empty")
+        if "." in name:
+            raise ServiceError(
+                f"expand name {name!r} contains '.'; only depth-1 expansion is"
+                " supported (dot notation not supported)"
+            )
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    if len(result) > 5:
+        raise ServiceError(f"at most 5 expand names allowed, got {len(result)}")
+    return result
+
+
+def available_expands(conn: sqlite3.Connection, dataset_id: int) -> list[dict[str, Any]]:
+    ds = store.get_dataset(conn, dataset_id)
+    if ds is None:
+        raise NotFound(f"dataset {dataset_id} not found")
+    rels = store.list_relationships_for_dataset(conn, dataset_id)
+    result: list[dict[str, Any]] = []
+    for rel in rels:
+        if int(rel["source_dataset_id"]) == dataset_id:
+            tgt = store.get_dataset(conn, int(rel["target_dataset_id"]))
+            result.append(
+                {
+                    "name": rel["expand_name"],
+                    "direction": "forward",
+                    "relationship_id": rel["id"],
+                    "relationship_name": rel["name"],
+                    "target_dataset_id": rel["target_dataset_id"],
+                    "target_dataset_key": tgt["key"] if tgt else None,
+                    "relation_type": rel["relation_type"],
+                    "returns": "object",
+                }
+            )
+        if int(rel["target_dataset_id"]) == dataset_id and rel.get("inverse_expand_name"):
+            src = store.get_dataset(conn, int(rel["source_dataset_id"]))
+            result.append(
+                {
+                    "name": rel["inverse_expand_name"],
+                    "direction": "inverse",
+                    "relationship_id": rel["id"],
+                    "relationship_name": rel["name"],
+                    "target_dataset_id": rel["source_dataset_id"],
+                    "target_dataset_key": src["key"] if src else None,
+                    "relation_type": rel["relation_type"],
+                    "returns": "array",
+                }
+            )
+    return result
+
+
+def expand_rows(
+    conn: sqlite3.Connection,
+    dataset_id: int,
+    rows: list[dict[str, Any]],
+    expand_names: list[str],
+) -> list[dict[str, Any]]:
+    if not expand_names:
+        return rows
+
+    avail = available_expands(conn, dataset_id)
+    avail_by_name = {e["name"]: e for e in avail}
+
+    for name in expand_names:
+        if name not in avail_by_name:
+            valid = sorted(avail_by_name)
+            raise ServiceError(
+                f"unknown expand name {name!r} for dataset {dataset_id}; valid: {valid}"
+            )
+
+    # cache: target_dataset_id -> {str(target_field_val): row_dict}
+    forward_cache: dict[int, dict[str, dict[str, Any]]] = {}
+    # cache: source_dataset_id -> {str(source_field_val): [row_dict, ...]}
+    inverse_cache: dict[int, dict[str, list[dict[str, Any]]]] = {}
+
+    for name in expand_names:
+        expand_info = avail_by_name[name]
+        if expand_info["direction"] == "forward":
+            tgt_id = int(expand_info["target_dataset_id"])
+            if tgt_id not in forward_cache:
+                rel = store.get_relationship(conn, int(expand_info["relationship_id"]))
+                if rel is None:
+                    forward_cache[tgt_id] = {}
+                    continue
+                target_field = rel["target_field"]
+                tgt_rows = store.list_rows(conn, tgt_id)
+                idx: dict[str, dict[str, Any]] = {}
+                for r in tgt_rows:
+                    if target_field in r:
+                        k = str(r[target_field])
+                        child = {kk: vv for kk, vv in r.items() if kk != "_row_id"}
+                        idx[k] = child
+                forward_cache[tgt_id] = idx
+        else:
+            src_id = int(expand_info["target_dataset_id"])  # inverse: other dataset is "source"
+            if src_id not in inverse_cache:
+                rel = store.get_relationship(conn, int(expand_info["relationship_id"]))
+                if rel is None:
+                    inverse_cache[src_id] = {}
+                    continue
+                source_field = rel["source_field"]
+                target_field = rel["target_field"]
+                src_rows = store.list_rows(conn, src_id)
+                iidx: dict[str, list[dict[str, Any]]] = {}
+                for r in src_rows:
+                    if source_field in r and r[source_field] is not None:
+                        k = str(r[source_field])
+                        child = {kk: vv for kk, vv in r.items() if kk != "_row_id"}
+                        iidx.setdefault(k, []).append(child)
+                inverse_cache[src_id] = iidx
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        new_row = dict(row)
+        for name in expand_names:
+            expand_info = avail_by_name[name]
+            rel = store.get_relationship(conn, int(expand_info["relationship_id"]))
+            if rel is None:
+                new_row[name] = None if expand_info["direction"] == "forward" else []
+                continue
+            if expand_info["direction"] == "forward":
+                source_field = rel["source_field"]
+                tgt_id = int(expand_info["target_dataset_id"])
+                src_val = row.get(source_field)
+                if src_val is None:
+                    new_row[name] = None
+                else:
+                    idx = forward_cache.get(tgt_id, {})
+                    new_row[name] = idx.get(str(src_val))
+            else:
+                target_field = rel["target_field"]
+                src_id = int(expand_info["target_dataset_id"])
+                tgt_val = row.get(target_field)
+                if tgt_val is None:
+                    new_row[name] = []
+                else:
+                    iidx = inverse_cache.get(src_id, {})
+                    new_row[name] = iidx.get(str(tgt_val), [])
+        result.append(new_row)
+    return result
+
+
+def ensure_demo_relationships(
+    conn: sqlite3.Connection, server_id: int | None = None
+) -> dict[str, Any]:
+    servers = (
+        [_require_server(conn, server_id)] if server_id is not None else store.list_servers(conn)
+    )
+    servers_touched = 0
+    relationships_created = 0
+    skipped_existing = 0
+
+    with transaction(conn):
+        for server in servers:
+            sid = int(server["id"])
+            datasets = store.list_datasets(conn, sid)
+            dataset_by_key = {str(d["key"]): d for d in datasets}
+            actual_keys = frozenset(dataset_by_key)
+
+            for required_keys, rel_specs in _DEMO_RELATIONSHIPS.items():
+                if not (required_keys <= actual_keys):
+                    continue
+                server_touched_this = False
+                for spec in rel_specs:
+                    src_ds = dataset_by_key[spec["source_key"]]
+                    tgt_ds = dataset_by_key[spec["target_key"]]
+                    src_id = int(src_ds["id"])
+                    tgt_id = int(tgt_ds["id"])
+                    sf = spec["source_field"]
+                    tf = spec["target_field"]
+                    existing = [
+                        r
+                        for r in store.list_relationships(conn, sid)
+                        if (
+                            int(r["source_dataset_id"]) == src_id
+                            and r["source_field"] == sf
+                            and int(r["target_dataset_id"]) == tgt_id
+                            and r["target_field"] == tf
+                        )
+                    ]
+                    if existing:
+                        skipped_existing += 1
+                        continue
+                    store.create_relationship(
+                        conn,
+                        sid,
+                        name=spec["name"],
+                        source_dataset_id=src_id,
+                        source_field=sf,
+                        target_dataset_id=tgt_id,
+                        target_field=tf,
+                        relation_type="many_to_one",
+                        expand_name=spec["expand_name"],
+                        inverse_expand_name=spec.get("inverse_expand_name"),
+                        required=False,
+                    )
+                    relationships_created += 1
+                    server_touched_this = True
+                if server_touched_this:
+                    servers_touched += 1
+
+    return {
+        "servers_touched": servers_touched,
+        "relationships_created": relationships_created,
+        "skipped_existing": skipped_existing,
+    }

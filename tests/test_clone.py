@@ -23,9 +23,7 @@ def conn() -> Iterator[sqlite3.Connection]:
 
 
 @pytest.fixture
-def client(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[TestClient]:
+def client(conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("AUTH_DISABLED", "1")
     app = FastAPI()
     app.include_router(api.router)
@@ -135,9 +133,10 @@ def test_clone_endpoint_dataset_ids_point_at_cloned_datasets(conn: sqlite3.Conne
         source_endpoint = source_endpoints[endpoint["tool_name"]]
         assert dataset_id in clone_dataset_ids
         assert dataset_id not in source_dataset_ids
-        assert clone_datasets[dataset_id]["key"] == source_datasets[
-            int(source_endpoint["dataset_id"])
-        ]["key"]
+        assert (
+            clone_datasets[dataset_id]["key"]
+            == source_datasets[int(source_endpoint["dataset_id"])]["key"]
+        )
 
 
 def test_mutating_clone_row_does_not_change_source(conn: sqlite3.Connection) -> None:

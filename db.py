@@ -10,7 +10,7 @@ from loguru import logger
 
 load_dotenv()
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _TX_DEPTH: dict[int, int] = {}
 
@@ -122,6 +122,28 @@ CREATE INDEX IF NOT EXISTS idx_endpoint_server ON endpoint(server_id);
 CREATE INDEX IF NOT EXISTS idx_dataset_server ON dataset(server_id);
 CREATE INDEX IF NOT EXISTS idx_llm_response_endpoint ON llm_response(llm_endpoint_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_call_log_created ON call_log(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS dataset_relationship (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL REFERENCES server(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    source_dataset_id INTEGER NOT NULL REFERENCES dataset(id) ON DELETE CASCADE,
+    source_field TEXT NOT NULL,
+    target_dataset_id INTEGER NOT NULL REFERENCES dataset(id) ON DELETE CASCADE,
+    target_field TEXT NOT NULL,
+    relation_type TEXT NOT NULL DEFAULT 'many_to_one'
+        CHECK (relation_type IN ('many_to_one','one_to_one')),
+    expand_name TEXT NOT NULL,
+    inverse_expand_name TEXT,
+    required INTEGER NOT NULL DEFAULT 0,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (server_id, name),
+    UNIQUE (source_dataset_id, source_field, target_dataset_id, target_field, expand_name)
+);
+CREATE INDEX IF NOT EXISTS idx_dsrel_server ON dataset_relationship(server_id);
+CREATE INDEX IF NOT EXISTS idx_dsrel_source ON dataset_relationship(source_dataset_id);
+CREATE INDEX IF NOT EXISTS idx_dsrel_target ON dataset_relationship(target_dataset_id);
 """
 
 

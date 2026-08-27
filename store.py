@@ -269,6 +269,84 @@ def delete_endpoint(conn: sqlite3.Connection, endpoint_id: int) -> None:
         conn.execute("DELETE FROM endpoint WHERE id = ?", (endpoint_id,))
 
 
+# --- dataset relationship --------------------------------------------------
+
+_REL_FIELDS = {
+    "name",
+    "source_dataset_id",
+    "source_field",
+    "target_dataset_id",
+    "target_field",
+    "relation_type",
+    "expand_name",
+    "inverse_expand_name",
+    "required",
+    "description",
+}
+
+
+def _rel_row(r: sqlite3.Row | None) -> dict[str, Any] | None:
+    if r is None:
+        return None
+    d = dict(r)
+    d["required"] = bool(d["required"])
+    return d
+
+
+def _rel_rows(rs: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [_rel_row(r) for r in rs]  # type: ignore[misc]
+
+
+def list_relationships(conn: sqlite3.Connection, server_id: int) -> list[dict[str, Any]]:
+    return _rel_rows(
+        conn.execute(
+            "SELECT * FROM dataset_relationship WHERE server_id = ? ORDER BY name",
+            (server_id,),
+        ).fetchall()
+    )
+
+
+def list_relationships_for_dataset(
+    conn: sqlite3.Connection, dataset_id: int
+) -> list[dict[str, Any]]:
+    return _rel_rows(
+        conn.execute(
+            "SELECT * FROM dataset_relationship "
+            "WHERE source_dataset_id = ? OR target_dataset_id = ? ORDER BY name",
+            (dataset_id, dataset_id),
+        ).fetchall()
+    )
+
+
+def get_relationship(conn: sqlite3.Connection, relationship_id: int) -> dict[str, Any] | None:
+    return _rel_row(
+        conn.execute(
+            "SELECT * FROM dataset_relationship WHERE id = ?",
+            (relationship_id,),
+        ).fetchone()
+    )
+
+
+def create_relationship(conn: sqlite3.Connection, server_id: int, **fields: Any) -> int:
+    sets: dict[str, Any] = {k: v for k, v in fields.items() if k in _REL_FIELDS and v is not None}
+    if "required" in fields and fields["required"] is not None:
+        sets["required"] = int(bool(fields["required"]))
+    sets["server_id"] = server_id
+    cols = ", ".join(sets)
+    marks = ", ".join("?" for _ in sets)
+    with transaction(conn):
+        cur = conn.execute(
+            f"INSERT INTO dataset_relationship ({cols}) VALUES ({marks})",
+            tuple(sets.values()),
+        )
+    return int(cur.lastrowid)
+
+
+def delete_relationship(conn: sqlite3.Connection, relationship_id: int) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM dataset_relationship WHERE id = ?", (relationship_id,))
+
+
 # --- llm endpoint ----------------------------------------------------------
 
 _LLM_FIELDS = {
@@ -407,9 +485,7 @@ def clear_traffic(conn: sqlite3.Connection) -> None:
 
 
 def get_admin_user(conn: sqlite3.Connection, username: str) -> dict[str, Any] | None:
-    return _row(
-        conn.execute("SELECT * FROM admin_user WHERE username = ?", (username,)).fetchone()
-    )
+    return _row(conn.execute("SELECT * FROM admin_user WHERE username = ?", (username,)).fetchone())
 
 
 def count_admin_users(conn: sqlite3.Connection) -> int:
@@ -453,9 +529,7 @@ def get_api_key_by_hash(conn: sqlite3.Connection, key_hash: str) -> dict[str, An
 
 def touch_api_key(conn: sqlite3.Connection, key_id: int) -> None:
     with transaction(conn):
-        conn.execute(
-            "UPDATE api_key SET last_used_at = datetime('now') WHERE id = ?", (key_id,)
-        )
+        conn.execute("UPDATE api_key SET last_used_at = datetime('now') WHERE id = ?", (key_id,))
 
 
 def revoke_api_key(conn: sqlite3.Connection, key_id: int) -> None:

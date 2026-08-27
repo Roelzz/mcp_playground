@@ -153,9 +153,7 @@ def test_swagger_shape_operations_parameters_and_definitions(client: TestClient)
     assert set(swagger["paths"]["/orders"]) == {"get", "post"}
 
     operations = [
-        operation
-        for path_item in swagger["paths"].values()
-        for operation in path_item.values()
+        operation for path_item in swagger["paths"].values() for operation in path_item.values()
     ]
     operation_ids = [operation["operationId"] for operation in operations]
     assert len(operation_ids) == 7

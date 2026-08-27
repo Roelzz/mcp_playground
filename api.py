@@ -16,6 +16,7 @@ from models import (
     LLMEndpointCreate,
     LLMEndpointUpdate,
     LLMResponseSpec,
+    RelationshipCreate,
     RowsPayload,
     ServerCreate,
     ServerUpdate,
@@ -256,9 +257,7 @@ def get_endpoint(
 def update_endpoint(
     endpoint_id: int, body: EndpointUpdate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
-    return _handle(
-        service.update_endpoint, conn, endpoint_id, **body.model_dump(exclude_none=True)
-    )
+    return _handle(service.update_endpoint, conn, endpoint_id, **body.model_dump(exclude_none=True))
 
 
 @router.delete("/endpoints/{endpoint_id}", status_code=204)
@@ -296,9 +295,7 @@ def get_llm_endpoint(
 def update_llm_endpoint(
     llm_id: int, body: LLMEndpointUpdate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
-    return _handle(
-        service.update_llm_endpoint, conn, llm_id, **body.model_dump(exclude_none=True)
-    )
+    return _handle(service.update_llm_endpoint, conn, llm_id, **body.model_dump(exclude_none=True))
 
 
 @router.delete("/llm-endpoints/{llm_id}", status_code=204)
@@ -355,3 +352,58 @@ def get_traffic_summary(
 @router.delete("/traffic", status_code=204)
 def clear_traffic(conn: sqlite3.Connection = Conn, _: Principal = Write) -> None:
     _handle(service.clear_traffic, conn)
+
+
+# --------------------------------------------------------------------- relationships
+
+
+class EnsureDemoRequest(BaseModel):
+    server_id: int | None = None
+
+
+@router.get("/servers/{server_id}/relationships/validate")
+def validate_relationships(
+    server_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin
+) -> dict[str, Any]:
+    return _handle(service.validate_relationships, conn, server_id)
+
+
+@router.get("/servers/{server_id}/relationships")
+def list_relationships(
+    server_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin
+) -> list[dict[str, Any]]:
+    return _handle(service.list_relationships, conn, server_id)
+
+
+@router.post("/servers/{server_id}/relationships", status_code=201)
+def create_relationship(
+    server_id: int,
+    body: RelationshipCreate,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Write,
+) -> dict[str, Any]:
+    return _handle(service.create_relationship, conn, server_id, **body.model_dump())
+
+
+@router.delete("/relationships/{relationship_id}", status_code=204)
+def delete_relationship(
+    relationship_id: int, conn: sqlite3.Connection = Conn, _: Principal = Write
+) -> None:
+    _handle(service.delete_relationship, conn, relationship_id)
+
+
+@router.post("/relationships/ensure-demo")
+def ensure_demo_relationships(
+    body: EnsureDemoRequest | None = None,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Write,
+) -> dict[str, Any]:
+    server_id = body.server_id if body is not None else None
+    return _handle(service.ensure_demo_relationships, conn, server_id)
+
+
+@router.get("/datasets/{dataset_id}/expands")
+def get_available_expands(
+    dataset_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin
+) -> list[dict[str, Any]]:
+    return _handle(service.available_expands, conn, dataset_id)

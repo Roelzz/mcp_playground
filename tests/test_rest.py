@@ -49,12 +49,8 @@ def _create_playground(
             conn, server_id, dataset_id, "GET", "/orders/search", "search_orders"
         ),
         "get": _create_endpoint(conn, server_id, dataset_id, "GET", "/orders/{id}", "get_order"),
-        "create": _create_endpoint(
-            conn, server_id, dataset_id, "POST", "/orders", "create_order"
-        ),
-        "put": _create_endpoint(
-            conn, server_id, dataset_id, "PUT", "/orders/{id}", "put_order"
-        ),
+        "create": _create_endpoint(conn, server_id, dataset_id, "POST", "/orders", "create_order"),
+        "put": _create_endpoint(conn, server_id, dataset_id, "PUT", "/orders/{id}", "put_order"),
         "patch": _create_endpoint(
             conn, server_id, dataset_id, "PATCH", "/orders/{id}", "patch_order"
         ),

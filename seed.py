@@ -858,7 +858,7 @@ def _seed_crm_server(conn: sqlite3.Connection) -> None:
     server = service.create_server(
         conn,
         slug="adatum-crm",
-        name="Datum Sales CRM",
+        name="Adatum Sales CRM",
         description=(
             "Sales CRM for accounts, buyer contacts, and active opportunities across EMEA. "
             "Makers can build sales assistants that find account context, connect contacts "
