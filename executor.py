@@ -136,13 +136,29 @@ def _execute_list(
     return limited
 
 
+def _reject_unknown_fields(rows: list[dict[str, Any]], body: dict[str, Any]) -> None:
+    """Reject field names the dataset has never seen. An empty dataset accepts anything."""
+    known = derive_field_schema(rows)
+    if not known:
+        return
+    unknown = sorted(key for key in body if key not in known)
+    if unknown:
+        raise ExecutorError(
+            f"unknown field(s): {', '.join(unknown)}. "
+            f"known fields: {', '.join(sorted(known))}",
+            code="invalid_params",
+        )
+
+
 def _execute_create(
     conn: sqlite3.Connection, dataset: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
+    rows = store.list_rows(conn, int(dataset["id"]))
+    _reject_unknown_fields(rows, params)
     row = dict(params)
     id_field = _id_field(dataset)
     if id_field not in row:
-        row[id_field] = _next_id(store.list_rows(conn, int(dataset["id"])), id_field)
+        row[id_field] = _next_id(rows, id_field)
     store.add_rows(conn, int(dataset["id"]), [row])
     return row
 
@@ -156,6 +172,7 @@ def _execute_update(
     target = _find_row(conn, endpoint, dataset, params)
     param_name = _required_path_param(endpoint)
     body = {key: value for key, value in params.items() if key != param_name}
+    _reject_unknown_fields(store.list_rows(conn, int(dataset["id"])), body)
     merged = {**_strip_row_id(target), **body}
     store.update_row(conn, int(target["_row_id"]), merged)
     return merged

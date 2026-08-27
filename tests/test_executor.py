@@ -404,3 +404,46 @@ def test_delete_unknown_id_raises_not_found(
         execute(conn, playground["endpoints"]["delete"], playground["dataset"], {"id": 999})
 
     assert exc.value.code == "not_found"
+
+
+def test_create_rejects_unknown_field_on_populated_dataset(
+    playground: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    with pytest.raises(ExecutorError) as excinfo:
+        execute(
+            conn,
+            playground["endpoints"]["create"],
+            playground["dataset"],
+            {"name": "Typo", "stattus": "open"},
+        )
+
+    assert excinfo.value.code == "invalid_params"
+    assert "stattus" in str(excinfo.value)
+    assert store.count_rows(conn, playground["dataset"]["id"]) == 5
+
+
+def test_create_accepts_any_field_on_empty_dataset(conn: sqlite3.Connection) -> None:
+    server_id = store.create_server(conn, "empty", "Empty", "", "none")
+    dataset_id = store.create_dataset(conn, server_id, "things", "id")
+    dataset = store.get_dataset(conn, dataset_id)
+    endpoint = _create_endpoint(conn, server_id, dataset_id, "/things", "POST", "create_thing")
+    assert dataset is not None
+
+    row = execute(conn, endpoint, dataset, {"whatever": "goes", "shape": "free"})
+
+    assert row == {"whatever": "goes", "shape": "free", "id": 1}
+
+
+def test_update_rejects_unknown_field(
+    playground: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    with pytest.raises(ExecutorError) as excinfo:
+        execute(
+            conn,
+            playground["endpoints"]["update"],
+            playground["dataset"],
+            {"id": "1", "stattus": "closed"},
+        )
+
+    assert excinfo.value.code == "invalid_params"
+    assert "stattus" in str(excinfo.value)

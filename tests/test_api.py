@@ -233,7 +233,7 @@ def test_readonly_key_may_call_read_tools_but_not_write_tools(client: TestClient
 
 def test_create_tool_body_is_flat_and_row_is_searchable(client: TestClient) -> None:
     server = _post_server(client, slug="flat")
-    dataset = _post_dataset(client, server["id"], [{"id": 1, "customer": "Alpha"}])
+    dataset = _post_dataset(client, server["id"], [{"id": 1, "customer": "Alpha", "status": "new"}])
     _post_endpoint(client, server["id"], dataset["id"], "POST", "/orders", "create_order")
     _post_endpoint(client, server["id"], dataset["id"], "GET", "/orders/search", "search_orders")
 
@@ -247,3 +247,20 @@ def test_create_tool_body_is_flat_and_row_is_searchable(client: TestClient) -> N
     found = client.post("/api/servers/flat/tools/search_orders/call", json={"q": "SmokeCo"})
     assert found.status_code == 200, found.text
     assert [row["customer"] for row in found.json()["result"]] == ["SmokeCo"]
+
+
+def test_create_tool_rejects_unknown_field_with_400(client: TestClient) -> None:
+    server = _post_server(client, slug="strict")
+    dataset = _post_dataset(client, server["id"], [{"id": 1, "customer": "Alpha"}])
+    _post_endpoint(client, server["id"], dataset["id"], "POST", "/orders", "create_order")
+
+    res = client.post(
+        "/api/servers/strict/tools/create_order/call",
+        json={"customer": "SmokeCo", "custommer": "typo"},
+    )
+
+    assert res.status_code == 400, res.text
+    assert "custommer" in res.json()["detail"]
+
+    rows = client.get(f"/api/datasets/{dataset['id']}/rows")
+    assert len(rows.json()) == 1
