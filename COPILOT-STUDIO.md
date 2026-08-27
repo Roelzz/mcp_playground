@@ -11,6 +11,65 @@ Both surfaces read the same datasets and enforce the same auth. Decide once, fol
 
 ---
 
+## Bootcamp provisioning for trainers
+
+Trainees do not log into MCP Playground. Trainers provision the mock servers first, then hand out URLs.
+
+1. Build one good source server, or use one of the seeded sample servers.
+2. Open the **Catalog** tab, the first tab in the sidebar.
+3. Use **Clone** for one copy, or **Bulk clone** to create one server per team.
+4. Open the **Cohort** tab, the second tab in the sidebar.
+5. Filter to the team prefix, check readiness, then export the handout.
+
+The Catalog cards show slug, auth mode, dataset/tool/row counts, and clone buttons. Bulk clone uses `prefix`, `count`, and optional `start`. Slugs are zero-padded to the width of `start + count - 1`, minimum width two, so prefix `hr-team`, count `20`, start `1` creates `hr-team01` through `hr-team20`.
+
+Clone deep-copies the server, datasets, live rows, seed rows, and endpoints with remapped dataset IDs. It does not copy API keys, traffic, or LLM endpoints.
+
+| Endpoint | Body | Result |
+|----------|------|--------|
+| `GET /api/catalog` | none | `200` bare JSON list. |
+| `POST /api/servers/{server_id}/clone` | `{"slug": "...", "name": "..."}` where `name` is optional | `201` with the new server; `404` source missing, `409` slug taken, `400` invalid slug. |
+| `POST /api/servers/{server_id}/bulk-clone` | `{"prefix": "...", "count": N, "start": 1}` where `start` defaults to `1` | `201` with `{"created": [...]}`. If any generated slug exists, it returns `409` and creates nothing. `count` must be `1` through `50`. |
+
+### Cohort handouts
+
+The Cohort tab has four panels:
+
+| Panel | What it does |
+|-------|--------------|
+| Team servers | Shows slug, name, status, auth, dataset/endpoint/row summary, calls, last call, MCP URL, and REST URL with Copy buttons. `Ready` means seeded, in sync, and no auth. `Data drift` means live rows differ from seed rows. Seeded API-key servers show `Needs key`. |
+| Handout preview | Print-friendly `Team slug | MCP URL | REST URL | Auth note` table. **Copy as Markdown**, **Download CSV**, and **Print view** honour the current filter. |
+| Traffic by team | Shows calls, OK, errors, average duration, and last call per slug, sorted by call count descending. A missing team row means that team has not called anything yet. |
+| Reset training environment | Destructive reset-to-seed. Use `Prefix filter` to target a cohort; empty prefix resets all servers after confirmation. |
+
+Set `PUBLIC_BASE_URL` to the URL trainees can actually reach before exporting handouts. Cohort builds MCP, REST, and Swagger URLs from it. The default is `http://localhost:2009`, which produces handout links that only work on the trainer's machine.
+
+| Endpoint | Result |
+|----------|--------|
+| `GET /api/cohort` | `200` bare list with `id`, `slug`, `name`, `description`, `auth_mode`, `dataset_count`, `endpoint_count`, `row_count`, `seed_count`, `seeded`, `in_sync`, `call_count`, `last_call_at`, `mcp_url`, `rest_url`, and `swagger_url`. |
+| `GET /api/traffic/summary` | `200` per-slug traffic summary with `call_count`, `ok_count`, `error_count`, `avg_duration_ms`, and `last_call_at`. |
+| `POST /api/servers/reset-all-to-seed` | Body is optional. Bodyless resets all servers; `{"prefix": "hr-team"}` resets matching slugs only. |
+
+The admin management MCP server at `/mcp/_admin` exposes 36 tools. The bootcamp tools are `get_cohort`, `get_traffic_summary`, and `reset_all_to_seed`; `reset_all_to_seed` requires `confirm=true` or it returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
+
+---
+
+## Seeded sample servers
+
+First boot creates 5 servers, 15 datasets, 42 endpoints, and 1 mock LLM endpoint. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
+
+| Slug | Name | Datasets | Tools | Rows |
+|------|------|----------|-------|------|
+| `contoso-orders` | Contoso Orders | 2 | 7 | 160 |
+| `northwind-hris` | Northwind HRIS | 3 | 9 | 64 |
+| `fabrikam-it-service` | Fabrikam IT Service Desk | 3 | 8 | 56 |
+| `adatum-crm` | Datum Sales CRM | 3 | 9 | 76 |
+| `contoso-expenses` | Contoso Travel Expenses | 4 | 9 | 116 |
+
+Dataset row totals: `contoso-orders` has `orders` 40 / `order_lines` 120; `northwind-hris` has `employees` 30 / `time_off_requests` 28 / `org_units` 6; `fabrikam-it-service` has `tickets` 30 / `assets` 18 / `service_catalog` 8; `adatum-crm` has `accounts` 20 / `contacts` 30 / `opportunities` 26; `contoso-expenses` has `expense_reports` 24 / `expense_lines` 60 / `cost_centres` 8 / `approvals` 24.
+
+---
+
 ## Before you connect anything: verify in the Test console
 
 A misconfigured Copilot Studio agent is hard to debug. A misconfigured mock server is easy to debug — but only if you test it before leaving the playground.
@@ -38,7 +97,7 @@ A server has one of two auth modes, set when the server is created:
 | `none` | Nothing. No credentials required. |
 | `api_key` | An API key in either `X-API-Key: <key>` or `Authorization: Bearer <key>`. Both headers are accepted; `Bearer` is checked first. |
 
-The seeded demo server `contoso-orders` uses `auth_mode: none`.
+The seeded demo servers use `auth_mode: none`.
 
 ### Creating an API key
 
@@ -47,6 +106,8 @@ The seeded demo server `contoso-orders` uses `auth_mode: none`.
 3. **Copy the key immediately.** It is shown exactly once. The key format is `mcpp_` followed by 43 URL-safe characters (48 characters in total).
 
 The key belongs to the playground application, not to a specific server. One key works for any server on the instance that has `auth_mode: api_key`.
+
+There is no per-team API key. The handout cannot contain one. No-auth servers are ready as-is; API-key servers need a global key distributed out-of-band.
 
 ---
 
