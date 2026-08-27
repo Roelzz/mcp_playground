@@ -79,22 +79,28 @@ machine behind Microsoft Entra Global Secure Access — `files.pythonhosted.org`
 blocked by web filtering, so `pypi.org` resolves but package downloads fail. The block
 applies inside containers too.
 
-If you hit that, point UV at a mirror without committing it as project config.
+If you hit that, redirect UV to a mirror locally — never commit the mirror as project
+config.
 
-Host-side (`uv sync`, `uv run`):
+Host-side dependency resolution (`uv lock`):
 
 ```bash
 export UV_DEFAULT_INDEX=https://<your-mirror>/simple
 ```
 
-Container build:
+Container build. `uv sync --frozen` uses the absolute artefact URLs recorded in
+`uv.lock`, so `UV_DEFAULT_INDEX` alone is not enough — rewrite the lock, build, restore:
 
 ```bash
-podman build --build-arg UV_DEFAULT_INDEX=https://<your-mirror>/simple -t mcp-playground .
+sed -i '' -e 's|https://files.pythonhosted.org/packages|https://<your-mirror>/packages|g' \
+          -e 's|https://pypi.org/simple|https://<your-mirror>/simple|g' uv.lock
+podman build -t mcp-playground .
+git checkout uv.lock
 ```
 
-`uv.lock` records upstream PyPI URLs plus sha256 hashes. A mirror that copies the
-pythonhosted layout serves identical artefacts, so the hashes still verify.
+`uv.lock` records sha256 hashes alongside every URL. A mirror that copies the
+pythonhosted path layout serves identical artefacts, so the hashes still verify and the
+rewrite is safe.
 
 For a production or Microsoft-shop deployment, use an Azure Artifacts feed with a PyPI
 upstream instead of a public mirror.
