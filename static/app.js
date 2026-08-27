@@ -3,6 +3,7 @@
 
   var TABS = [
     ["catalog", "Catalog"],
+    ["cohort", "Cohort"],
     ["servers", "Servers"],
     ["datasets", "Datasets"],
     ["endpoints", "Endpoints"],
@@ -19,6 +20,12 @@
     loading: false,
     servers: [],
     catalog: [],
+    cohort: [],
+    cohortError: null,
+    cohortTrafficSummary: [],
+    cohortTrafficError: null,
+    cohortFilter: "",
+    cohortResetting: false,
     selectedServerId: null,
     datasets: [],
     selectedDatasetId: null,
@@ -266,6 +273,30 @@
     state.catalog = await api("/api/catalog") || [];
   }
 
+  async function loadCohort() {
+    try {
+      state.cohort = await api("/api/cohort", { silentError: true }) || [];
+      state.cohortError = null;
+    } catch (err) {
+      state.cohort = [];
+      state.cohortError = err.message || "Cohort endpoint unavailable.";
+    }
+  }
+
+  async function loadCohortTrafficSummary() {
+    try {
+      state.cohortTrafficSummary = await api("/api/traffic/summary", { silentError: true }) || [];
+      state.cohortTrafficError = null;
+    } catch (err) {
+      state.cohortTrafficSummary = [];
+      state.cohortTrafficError = err.message || "Traffic summary endpoint unavailable.";
+    }
+  }
+
+  async function loadCohortPage() {
+    await Promise.all([loadCohort(), loadCohortTrafficSummary()]);
+  }
+
   async function loadServers() {
     state.servers = await api("/api/servers");
     if (state.servers.length && !selectedServer()) state.selectedServerId = state.servers[0].id;
@@ -335,6 +366,7 @@
 
   function pageHtml() {
     if (state.tab === "catalog") return renderCatalog();
+    if (state.tab === "cohort") return renderCohort();
     if (state.tab === "servers") return renderServers();
     if (state.tab === "datasets") return renderDatasets();
     if (state.tab === "endpoints") return renderEndpoints();
@@ -377,6 +409,127 @@
       "<div class=\"card-desc\">" + esc(server.description || "No description") + "</div>" +
       "<div class=\"catalog-metrics\"><span class=\"badge\">" + esc(metricCount(server.dataset_count)) + " datasets</span><span class=\"badge\">" + esc(metricCount(server.endpoint_count)) + " tools</span><span class=\"badge neutral\">" + esc(metricCount(server.row_count)) + " rows</span></div>" +
       "<div class=\"actions\"><button class=\"btn small\" data-action=\"clone-server\" data-id=\"" + esc(server.id) + "\"" + disabledIfReadonly() + ">Clone</button><button class=\"btn small primary\" data-action=\"bulk-clone-server\" data-id=\"" + esc(server.id) + "\"" + disabledIfReadonly() + ">Bulk clone</button></div></article>";
+  }
+
+  function renderCohort() {
+    return pageHeader("Cohort", "Bootcamp control panel for team servers, handouts, traffic, and reset-to-seed.") +
+      "<div class=\"cohort-screen\">" +
+      "<section class=\"panel cohort-no-print\"><div class=\"panel-heading\"><div><h2>Team servers</h2><p>Scan readiness before trainees start wiring MCP and REST endpoints into Copilot Studio.</p></div><button class=\"btn\" type=\"button\" data-action=\"refresh-cohort\">Refresh</button></div>" +
+      cohortAuthCallout() + cohortSummaryHtml() + cohortToolbarHtml() + cohortTeamTable() + "</section>" +
+      cohortHandoutHtml() + cohortTrafficSummaryHtml() + cohortResetHtml() + "</div>";
+  }
+
+  function cohortAuthCallout() {
+    return "<div class=\"callout info\"><strong>Auth reality:</strong> API keys are global, hashed, and shown only once when created. There is no per-team key. No-auth servers are handout-ready; API-key servers need a key supplied out-of-band.</div>";
+  }
+
+  function cohortSummaryHtml() {
+    var rows = state.cohort || [];
+    var seeded = rows.filter(function (s) { return s.seeded; }).length;
+    var inSync = rows.filter(function (s) { return s.in_sync; }).length;
+    var active = rows.filter(function (s) { return metricCount(s.call_count) > 0; }).length;
+    var calls = rows.reduce(function (total, s) { return total + metricCount(s.call_count); }, 0);
+    return "<div class=\"catalog-metrics cohort-summary\"><span class=\"badge\">" + esc(rows.length) + " servers</span><span class=\"badge\">" + esc(seeded) + " seeded</span><span class=\"badge\">" + esc(inSync) + " in sync</span><span class=\"badge neutral\">" + esc(active) + " have calls</span><span class=\"badge neutral\">" + esc(calls) + " total calls</span></div>";
+  }
+
+  function cohortToolbarHtml() {
+    return "<div class=\"toolbar cohort-toolbar\"><div class=\"form-row cohort-filter\"><label for=\"cohort-filter\">Filter teams</label><input id=\"cohort-filter\" value=\"" + esc(state.cohortFilter) + "\" placeholder=\"Filter by slug or name\"></div>" +
+      "<div class=\"actions\"><button class=\"btn primary\" type=\"button\" data-action=\"export-handout-markdown\">Copy as Markdown</button><button class=\"btn\" type=\"button\" data-action=\"download-handout-csv\">Download CSV</button><button class=\"btn\" type=\"button\" data-action=\"print-handout\">Print view</button></div><span class=\"help\" data-cohort-filter-summary></span></div>";
+  }
+
+  function cohortTeamTable() {
+    if (state.cohortError) return "<div class=\"error-inline\">Cohort endpoint unavailable: " + esc(state.cohortError) + "</div>";
+    if (!state.cohort.length) return "<div class=\"empty\">No team servers found. Bulk-clone from Catalog first.</div>";
+    return "<div class=\"table-wrap\"><table class=\"cohort-table\"><thead><tr><th>Slug</th><th>Name</th><th>Status</th><th>Auth</th><th>Data</th><th>Calls</th><th>Last call</th><th>MCP URL</th><th>REST URL</th></tr></thead><tbody>" +
+      state.cohort.map(cohortTeamRow).join("") + "</tbody></table></div><div id=\"cohort-no-results\" class=\"empty\" hidden>No team servers match that filter.</div>";
+  }
+
+  function cohortTeamRow(server) {
+    var status = cohortStatus(server);
+    return "<tr class=\"cohort-row\" data-search=\"" + esc(cohortSearchText(server)) + "\"><td><code>" + esc(server.slug) + "</code></td><td><strong>" + esc(server.name) + "</strong></td>" +
+      "<td><span class=\"status-pill\" data-state=\"" + esc(status[0]) + "\">" + esc(status[1]) + "</span><div class=\"help\">" + esc(cohortStatusDetail(server)) + "</div></td>" +
+      "<td>" + cohortAuthPill(server) + cohortKeyHelp(server) + "</td><td>" + esc(metricCount(server.dataset_count)) + " datasets · " + esc(metricCount(server.endpoint_count)) + " endpoints · " + esc(metricCount(server.row_count)) + " rows</td>" +
+      "<td>" + esc(metricCount(server.call_count)) + "</td><td>" + esc(server.last_call_at || "never") + "</td><td>" + copyControl(cohortMcpUrl(server)) + "</td><td>" + copyControl(cohortRestUrl(server)) + "</td></tr>";
+  }
+
+  function cohortStatus(server) {
+    if (!server.seeded) return ["bad", "No seed data"];
+    if (!server.in_sync) return ["warn", "Data drift"];
+    if (server.auth_mode === "api_key") return ["warn", "Needs key"];
+    return ["ok", "Ready"];
+  }
+
+  function cohortStatusDetail(server) {
+    if (!server.seeded) return "Reset will empty this server.";
+    if (!server.in_sync) return "Live rows differ from seed rows.";
+    if (server.auth_mode === "api_key") return "Seeded and synced, but not handout-ready without a key.";
+    return "Seeded, in sync, no auth.";
+  }
+
+  function cohortAuthPill(server) {
+    return "<span class=\"auth-pill cohort-auth-pill\"><span class=\"auth-option\">" + esc(authLabel(server)) + "</span></span>";
+  }
+
+  function cohortKeyHelp(server) {
+    return server.auth_mode === "api_key" ? "<div class=\"help\">Global key required; no per-team key exists.</div>" : "";
+  }
+
+  function cohortMcpUrl(server) {
+    return server.mcp_url || endpointUrl(server);
+  }
+
+  function cohortRestUrl(server) {
+    return server.rest_url || restBaseUrl(server);
+  }
+
+  function copyControl(value) {
+    return "<div class=\"copy-control\"><span class=\"url-text\">" + esc(value || "") + "</span><button class=\"btn small\" data-copy=\"" + esc(value || "") + "\">Copy</button></div>";
+  }
+
+  function cohortSearchText(server) {
+    return String((server.slug || "") + " " + (server.name || "")).toLowerCase();
+  }
+
+  function cohortFilteredServers() {
+    var query = (state.cohortFilter || "").trim().toLowerCase();
+    return (state.cohort || []).filter(function (server) {
+      return !query || cohortSearchText(server).indexOf(query) !== -1;
+    });
+  }
+
+  function cohortHandoutHtml() {
+    if (state.cohortError || !state.cohort.length) return "";
+    return "<section class=\"panel cohort-print\"><div class=\"panel-heading cohort-no-print\"><div><h2>Handout preview</h2><p>Exports use the currently visible filtered rows.</p></div></div>" +
+      "<h2 class=\"cohort-print-title\">MCP Playground team handout</h2><p class=\"help cohort-print-note\">API-key servers require a global key supplied separately. Keys are never exported here.</p>" +
+      "<div class=\"table-wrap\"><table class=\"cohort-handout-table\"><thead><tr><th>Team slug</th><th>MCP URL</th><th>REST URL</th><th>Auth note</th></tr></thead><tbody>" +
+      state.cohort.map(cohortHandoutRow).join("") + "</tbody></table></div><div id=\"cohort-handout-empty\" class=\"empty\" hidden>No rows to export with the current filter.</div></section>";
+  }
+
+  function cohortHandoutRow(server) {
+    return "<tr class=\"cohort-handout-row\" data-search=\"" + esc(cohortSearchText(server)) + "\"><td><code>" + esc(server.slug) + "</code></td><td>" + esc(cohortMcpUrl(server)) + "</td><td>" + esc(cohortRestUrl(server)) + "</td><td>" + esc(cohortAuthNote(server)) + "</td></tr>";
+  }
+
+  function cohortAuthNote(server) {
+    return server.auth_mode === "api_key" ? "Requires global API key supplied out-of-band" : "Ready as-is";
+  }
+
+  function cohortTrafficSummaryHtml() {
+    return "<section class=\"panel cohort-no-print\"><div class=\"panel-heading\"><div><h2>Traffic by team</h2><p>Find who has called their server and who is hitting errors.</p></div><button class=\"btn\" type=\"button\" data-action=\"refresh-cohort-traffic\">Refresh</button></div>" + cohortTrafficTable() + "</section>";
+  }
+
+  function cohortTrafficTable() {
+    if (state.cohortTrafficError) return "<div class=\"error-inline\">Traffic summary unavailable: " + esc(state.cohortTrafficError) + "</div>";
+    if (!state.cohortTrafficSummary.length) return "<div class=\"empty\">No traffic yet. Once trainees test their connector, calls show up here.</div>";
+    return "<div class=\"table-wrap\"><table><thead><tr><th>Slug</th><th>Calls</th><th>OK</th><th>Errors</th><th>Avg duration</th><th>Last call</th></tr></thead><tbody>" +
+      state.cohortTrafficSummary.map(function (r) {
+        var errors = metricCount(r.error_count);
+        return "<tr><td><code>" + esc(r.target_slug || "(unknown)") + "</code></td><td>" + esc(metricCount(r.call_count)) + "</td><td>" + esc(metricCount(r.ok_count)) + "</td><td>" + (errors ? "<span class=\"badge bad cohort-error-count\">" + esc(errors) + "</span>" : esc(errors)) + "</td><td>" + esc(metricCount(r.avg_duration_ms)) + " ms</td><td>" + esc(r.last_call_at || "never") + "</td></tr>";
+      }).join("") + "</tbody></table></div>";
+  }
+
+  function cohortResetHtml() {
+    return "<section class=\"panel cohort-no-print\"><div class=\"panel-heading\"><div><h2>Reset training environment</h2><p>Restore matching live rows from seed rows between cohorts.</p></div><span class=\"status-pill\" data-state=\"bad\">Destructive</span></div>" +
+      "<form class=\"form-grid\" data-form=\"cohort-reset\"><div class=\"cohort-reset-grid\"><div class=\"form-row\"><label for=\"cohort-reset-prefix\">Prefix filter</label><input id=\"cohort-reset-prefix\" name=\"prefix\" placeholder=\"hr-team\"><span class=\"help\">Leave empty to reset ALL servers.</span></div><button class=\"btn danger\" type=\"submit\"" + disabledIfReadonly() + ">Reset matching servers</button></div></form></section>";
   }
 
   function renderServers() {
@@ -713,6 +866,7 @@
     updateProxyFields();
     updateToolHelp();
     applyToolSearch();
+    applyCohortFilter();
     updateDatasetPreview();
   }
 
@@ -869,6 +1023,79 @@
     }
   }
 
+  function applyCohortFilter() {
+    var inputEl = document.getElementById("cohort-filter");
+    if (!inputEl) return;
+    var query = inputEl.value.trim().toLowerCase();
+    var total = state.cohort.length;
+    var visible = 0;
+    Array.prototype.forEach.call(document.querySelectorAll(".cohort-row"), function (row) {
+      var match = !query || String(row.dataset.search || "").indexOf(query) !== -1;
+      row.hidden = !match;
+      if (match) visible += 1;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".cohort-handout-row"), function (row) {
+      row.hidden = query && String(row.dataset.search || "").indexOf(query) === -1;
+    });
+    var summary = document.querySelector("[data-cohort-filter-summary]");
+    if (summary) summary.textContent = query ? "Filter active: exporting " + visible + " of " + total + " team servers." : "Export includes all " + total + " team servers.";
+    var noResults = document.getElementById("cohort-no-results");
+    if (noResults) noResults.hidden = visible || !total;
+    var handoutEmpty = document.getElementById("cohort-handout-empty");
+    if (handoutEmpty) handoutEmpty.hidden = visible || !total;
+  }
+
+  function handoutRows() {
+    return cohortFilteredServers().map(function (server) {
+      return [server.slug || "", cohortMcpUrl(server), cohortRestUrl(server), cohortAuthNote(server)];
+    });
+  }
+
+  function handoutMarkdown() {
+    var lines = ["| Team slug | MCP URL | REST URL | Auth note |", "| --- | --- | --- | --- |"];
+    handoutRows().forEach(function (row) {
+      lines.push("| " + row.map(markdownCell).join(" | ") + " |");
+    });
+    return lines.join("\n");
+  }
+
+  function markdownCell(value) {
+    return String(value == null ? "" : value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  }
+
+  function handoutCsv() {
+    var rows = [["Team slug", "MCP URL", "REST URL", "Auth note"]].concat(handoutRows());
+    return rows.map(function (row) { return row.map(csvCell).join(","); }).join("\n");
+  }
+
+  function csvCell(value) {
+    var text = String(value == null ? "" : value);
+    return /[",\r\n]/.test(text) ? "\"" + text.replace(/"/g, "\"\"") + "\"" : text;
+  }
+
+  async function copyHandoutMarkdown() {
+    if (!handoutRows().length) { toast("No rows to export.", "error"); return; }
+    await copyText(handoutMarkdown());
+  }
+
+  function downloadHandoutCsv() {
+    if (!handoutRows().length) { toast("No rows to export.", "error"); return; }
+    var blob = new Blob([handoutCsv()], { type: "text/csv;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = state.cohortFilter.trim() ? "cohort-handout-filtered.csv" : "cohort-handout.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+  }
+
+  function printHandout() {
+    if (!handoutRows().length) { toast("No rows to print.", "error"); return; }
+    window.print();
+  }
+
   function readRulesFromDom() {
     return Array.prototype.map.call(document.querySelectorAll(".rule-card"), function (card) {
       var i = card.dataset.ruleIndex;
@@ -888,6 +1115,10 @@
     if (event.target.matches("#tool-search")) {
       state.testSearch = event.target.value;
       applyToolSearch();
+    }
+    if (event.target.matches("#cohort-filter")) {
+      state.cohortFilter = event.target.value;
+      applyCohortFilter();
     }
     if (event.target.matches("[data-bulk-clone-field]")) updateBulkClonePreview();
     if (event.target.matches("form[data-form='endpoint'] input[name='path']")) updateToolTypePreview();
@@ -929,6 +1160,7 @@
       if (form.dataset.form === "server") await submitServer(form);
       if (form.dataset.form === "clone-server") await submitClone(form);
       if (form.dataset.form === "bulk-clone-server") await submitBulkClone(form);
+      if (form.dataset.form === "cohort-reset") await submitCohortReset(form);
       if (form.dataset.form === "dataset") await submitDataset(form);
       if (form.dataset.form === "dataset-meta") await submitDatasetMeta(form);
       if (form.dataset.form === "rows") await submitRows(form);
@@ -954,6 +1186,11 @@
       if (action === "close-modal") { modalRoot.innerHTML = ""; return; }
       if (action === "clone-server") openCloneModal(catalogServerById(button.dataset.id));
       if (action === "bulk-clone-server") openBulkCloneModal(catalogServerById(button.dataset.id));
+      if (action === "refresh-cohort") { await loadCohortPage(); render(); }
+      if (action === "refresh-cohort-traffic") { await loadCohortTrafficSummary(); render(); }
+      if (action === "export-handout-markdown") await copyHandoutMarkdown();
+      if (action === "download-handout-csv") downloadHandoutCsv();
+      if (action === "print-handout") printHandout();
       if (action === "edit-server") { state.editingServerId = Number(button.dataset.id); render(); }
       if (action === "cancel-server-edit") { state.editingServerId = null; render(); }
       if (action === "delete-server") await deleteItem("server", button.dataset.id, button.dataset.name, "/api/servers/" + button.dataset.id, async function () { await loadServers(); await refreshForServer(); });
@@ -1044,6 +1281,26 @@
       toast("Servers cloned.", "ok");
     } catch (err) {
       showCloneError(form, cloneErrorMessage(err, true));
+    }
+  }
+
+  async function submitCohortReset(form) {
+    if (state.cohortResetting) return;
+    if (!canWrite()) throw new Error("Readonly users cannot mutate data.");
+    var data = formData(form);
+    var prefix = (data.prefix || "").trim();
+    var target = prefix ? "servers whose slug starts with \"" + prefix + "\"" : "ALL servers";
+    var message = "Restore " + target + " from seed rows, discarding any trainee changes in live rows.";
+    if (!await confirmModal("Reset training environment", message, "Reset")) return;
+    state.cohortResetting = true;
+    try {
+      var result = await api("/api/servers/reset-all-to-seed", { method: "POST", body: JSON.stringify({ prefix: prefix || null }) });
+      await loadCohortPage();
+      render();
+      if (metricCount(result && result.server_count)) toast("Reset " + metricCount(result.server_count) + " servers, " + metricCount(result.dataset_count) + " datasets, " + metricCount(result.row_count) + " rows.", "ok");
+      else toast(prefix ? "Nothing matched that prefix." : "No servers matched.", "ok");
+    } finally {
+      state.cohortResetting = false;
     }
   }
 
@@ -1249,6 +1506,7 @@
     state.tab = tab.dataset.tab;
     try {
       if (state.tab === "catalog") await loadCatalog();
+      if (state.tab === "cohort") await loadCohortPage();
       if (state.tab === "datasets") await loadDatasets();
       if (state.tab === "endpoints") await refreshForServer();
       if (state.tab === "llm") await loadLlms();
