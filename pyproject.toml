@@ -1,0 +1,40 @@
+[project]
+name = "mcp-playground"
+version = "0.1.0"
+description = "Persistent mock MCP servers and OpenAI-compatible endpoints for Copilot Studio demos and training"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "mcp>=1.28,<2",
+    "pydantic>=2",
+    "pyyaml",
+    "loguru",
+    "python-dotenv",
+    "httpx",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+# files.pythonhosted.org is blocked by Entra Global Secure Access web filtering.
+# Swap for an Azure Artifacts feed with a PyPI upstream when one is available.
+[[tool.uv.index]]
+name = "mirror"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
