@@ -12,6 +12,8 @@ load_dotenv()
 
 SCHEMA_VERSION = 1
 
+_TX_DEPTH: dict[int, int] = {}
+
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
@@ -139,13 +141,28 @@ def connect(path: str | None = None) -> sqlite3.Connection:
 
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    """Commit on success, roll back on any exception."""
+    """Commit on success, roll back on any exception.
+
+    Reentrant: store.py helpers open their own transaction, so a service-level
+    multi-step write would otherwise commit halfway and leave orphans behind.
+    Only the outermost block commits or rolls back.
+    """
+    key = id(conn)
+    depth = _TX_DEPTH.get(key, 0)
+    _TX_DEPTH[key] = depth + 1
     try:
         yield conn
-        conn.commit()
+        if depth == 0:
+            conn.commit()
     except Exception:
-        conn.rollback()
+        if depth == 0:
+            conn.rollback()
         raise
+    finally:
+        if depth == 0:
+            _TX_DEPTH.pop(key, None)
+        else:
+            _TX_DEPTH[key] = depth
 
 
 def current_version(conn: sqlite3.Connection) -> int:
