@@ -1,0 +1,155 @@
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import db
+import mcp_builder
+import seed
+import service
+
+
+@pytest.fixture
+def conn(tmp_path: Path) -> sqlite3.Connection:
+    conn = db.init_db(str(tmp_path / "test.db"))
+    seed.seed_if_empty(conn)
+    return conn
+
+
+def _tools(conn: sqlite3.Connection) -> dict[str, Any]:
+    server = mcp_builder.build_server(conn, "contoso-orders")
+    return {tool.name: tool for tool in server._tool_manager._tools.values()}
+
+
+def test_build_server_exposes_every_endpoint_as_a_tool(conn: sqlite3.Connection) -> None:
+    assert set(_tools(conn)) == {
+        "list_orders",
+        "search_orders",
+        "get_order",
+        "create_order",
+        "update_order",
+        "delete_order",
+        "list_order_lines",
+    }
+
+
+def test_build_server_rejects_unknown_slug(conn: sqlite3.Connection) -> None:
+    with pytest.raises(service.NotFound):
+        mcp_builder.build_server(conn, "nope")
+
+
+def test_get_tool_requires_only_the_id_param(conn: sqlite3.Connection) -> None:
+    schema = _tools(conn)["get_order"].parameters
+    assert schema["required"] == ["id"]
+    assert set(schema["properties"]) == {"id"}
+    assert schema["properties"]["id"]["type"] == "integer"
+
+
+def test_list_tool_has_optional_filters_and_limit(conn: sqlite3.Connection) -> None:
+    schema = _tools(conn)["list_orders"].parameters
+    assert schema.get("required", []) == []
+    assert "limit" in schema["properties"]
+    assert schema["properties"]["limit"]["default"] == 50
+    assert schema["properties"]["total"]["type"] == "number"
+
+
+def test_search_tool_exposes_a_query_param(conn: sqlite3.Connection) -> None:
+    schema = _tools(conn)["search_orders"].parameters
+    assert "q" in schema["properties"]
+    assert schema.get("required", []) == []
+
+
+def test_update_tool_requires_the_path_param_only(conn: sqlite3.Connection) -> None:
+    schema = _tools(conn)["update_order"].parameters
+    assert schema["required"] == ["id"]
+    assert "customer" in schema["properties"]
+
+
+def test_create_tool_has_no_required_params(conn: sqlite3.Connection) -> None:
+    schema = _tools(conn)["create_order"].parameters
+    assert schema.get("required", []) == []
+    assert "automatically" in schema["properties"]["id"]["description"]
+
+
+def _call(conn: sqlite3.Connection, name: str, args: dict[str, Any]) -> Any:
+    return _tools(conn)[name].fn(**args)
+
+
+def test_get_tool_returns_the_row(conn: sqlite3.Connection) -> None:
+    row = _call(conn, "get_order", {"id": 1008})
+    assert row["id"] == 1008
+    assert "_row_id" not in row
+
+
+def test_list_tool_applies_summary_fields_and_limit(conn: sqlite3.Connection) -> None:
+    rows = _call(conn, "list_orders", {"limit": 3})
+    assert len(rows) == 3
+    assert set(rows[0]) == {"id", "customer", "status", "total"}
+
+
+def test_list_tool_filters_by_field(conn: sqlite3.Connection) -> None:
+    rows = _call(conn, "list_orders", {"status": "cancelled", "limit": 50})
+    assert rows
+    assert all(row["status"] == "cancelled" for row in rows)
+
+
+def test_unset_optional_filters_are_stripped(conn: sqlite3.Connection) -> None:
+    unfiltered = _call(conn, "list_orders", {"limit": 50})
+    assert len(unfiltered) == 40
+
+
+def test_search_tool_matches_on_free_text(conn: sqlite3.Connection) -> None:
+    rows = _call(conn, "search_orders", {"q": "Fabrikam", "limit": 50})
+    assert rows
+    assert all("Fabrikam" in row["customer"] for row in rows)
+
+
+def test_update_tool_persists_the_change(conn: sqlite3.Connection) -> None:
+    _call(conn, "update_order", {"id": 1008, "status": "cancelled"})
+    row = _call(conn, "get_order", {"id": 1008})
+    assert row["status"] == "cancelled"
+
+
+def test_create_tool_assigns_an_id(conn: sqlite3.Connection) -> None:
+    created = _call(conn, "create_order", {"customer": "Northwind", "status": "open"})
+    assert isinstance(created["id"], int)
+    assert (_call(conn, "get_order", {"id": created["id"]}))["customer"] == "Northwind"
+
+
+def test_create_tool_does_not_store_unset_params(conn: sqlite3.Connection) -> None:
+    created = _call(conn, "create_order", {"customer": "Northwind"})
+    assert "region" not in created
+
+
+def test_delete_tool_removes_the_row(conn: sqlite3.Connection) -> None:
+    assert (_call(conn, "delete_order", {"id": 1008}))["deleted"] is True
+    with pytest.raises(service.ServiceError):
+        _call(conn, "get_order", {"id": 1008})
+
+
+def test_missing_row_raises(conn: sqlite3.Connection) -> None:
+    with pytest.raises(service.ServiceError):
+        _call(conn, "get_order", {"id": 999999})
+
+
+def test_tools_reflect_endpoint_changes_without_restart(conn: sqlite3.Connection) -> None:
+    server_id = int(service.list_servers(conn)[0]["id"])
+    endpoint = next(
+        e for e in service.list_endpoints(conn, server_id) if e["tool_name"] == "delete_order"
+    )
+    service.delete_endpoint(conn, int(endpoint["id"]))
+    assert "delete_order" not in _tools(conn)
+
+
+def test_field_schema_drives_param_types(conn: sqlite3.Connection) -> None:
+    schema = _tools(conn)["list_order_lines"].parameters["properties"]
+    assert schema["quantity"]["type"] == "integer"
+    assert schema["unit_price"]["type"] == "number"
+    assert schema["sku"]["type"] == "string"
+
+
+def test_generated_schema_is_json_serialisable(conn: sqlite3.Connection) -> None:
+    for tool in _tools(conn).values():
+        json.dumps(tool.parameters)
