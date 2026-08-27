@@ -30,7 +30,7 @@ _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 logger.remove()
 logger.add(
     sink=lambda msg: print(msg, end="", flush=True),
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=os.getenv("LOG_LEVEL") or "INFO",
     format="{time:DD-MM-YYYY at HH:mm:ss} | {level: <8} | {message}",
 )
 
@@ -126,8 +126,8 @@ def health() -> dict[str, str]:
 def main() -> None:
     import uvicorn
 
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "2009"))
+    host = os.getenv("HOST") or "0.0.0.0"
+    port = int(os.getenv("PORT") or "2009")
     logger.info(f"Starting MCP Playground on {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_config=None)
 

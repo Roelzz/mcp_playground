@@ -140,7 +140,7 @@ def _get_connection_info(conn: sqlite3.Connection, slug: str) -> Any:
     if _is_error(endpoints):
         return endpoints
 
-    base_url = os.getenv("PUBLIC_BASE_URL", "http://localhost:2009").rstrip("/")
+    base_url = (os.getenv("PUBLIC_BASE_URL") or "http://localhost:2009").rstrip("/")
     auth_mode = str(server_row["auth_mode"])
     return {
         "server_name": server_row["name"],

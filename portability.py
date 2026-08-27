@@ -218,7 +218,7 @@ def export_swagger(
     _: auth.Principal = Admin,
 ) -> Any:
     swagger = _handle(
-        build_swagger, conn, server_id, os.getenv("PUBLIC_BASE_URL", "http://localhost:2009")
+        build_swagger, conn, server_id, os.getenv("PUBLIC_BASE_URL") or "http://localhost:2009"
     )
     if not download:
         return swagger

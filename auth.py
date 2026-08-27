@@ -140,9 +140,9 @@ def bootstrap(conn: sqlite3.Connection) -> None:
     if row is not None:
         return
 
-    username = os.getenv("BOOTSTRAP_USER", "admin")
-    password = os.getenv("BOOTSTRAP_PASSWORD")
-    if password is None:
+    username = (os.getenv("BOOTSTRAP_USER") or "").strip() or "admin"
+    password = (os.getenv("BOOTSTRAP_PASSWORD") or "").strip()
+    if not password:
         password = secrets.token_urlsafe(16)
         logger.warning(
             "\n"
