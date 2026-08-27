@@ -3,6 +3,7 @@
 `api.py` and `admin_mcp.py` are thin wrappers over this. Neither may add logic.
 """
 
+import os
 import re
 import sqlite3
 import time
@@ -222,6 +223,96 @@ def get_catalog(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return list_servers(conn)
 
 
+def _public_base_url() -> str:
+    return (os.getenv("PUBLIC_BASE_URL") or "http://localhost:2009").rstrip("/")
+
+
+def get_cohort(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    base_url = _public_base_url()
+    rows = conn.execute(
+        """
+        WITH live_counts AS (
+            SELECT dataset_id, COUNT(*) AS row_count
+            FROM dataset_row
+            GROUP BY dataset_id
+        ),
+        seed_counts AS (
+            SELECT dataset_id, COUNT(*) AS seed_count
+            FROM dataset_seed_row
+            GROUP BY dataset_id
+        ),
+        dataset_counts AS (
+            SELECT
+                d.server_id,
+                COUNT(*) AS dataset_count,
+                SUM(COALESCE(live_counts.row_count, 0)) AS row_count,
+                SUM(COALESCE(seed_counts.seed_count, 0)) AS seed_count,
+                SUM(CASE WHEN COALESCE(seed_counts.seed_count, 0) = 0 THEN 1 ELSE 0 END)
+                    AS empty_seed_dataset_count
+            FROM dataset d
+            LEFT JOIN live_counts ON live_counts.dataset_id = d.id
+            LEFT JOIN seed_counts ON seed_counts.dataset_id = d.id
+            GROUP BY d.server_id
+        ),
+        endpoint_counts AS (
+            SELECT server_id, COUNT(*) AS endpoint_count
+            FROM endpoint
+            GROUP BY server_id
+        ),
+        traffic_counts AS (
+            SELECT target_slug, COUNT(*) AS call_count, MAX(created_at) AS last_call_at
+            FROM call_log
+            GROUP BY target_slug
+        )
+        SELECT
+            s.id,
+            s.slug,
+            s.name,
+            s.description,
+            s.auth_mode,
+            COALESCE(dataset_counts.dataset_count, 0) AS dataset_count,
+            COALESCE(endpoint_counts.endpoint_count, 0) AS endpoint_count,
+            COALESCE(dataset_counts.row_count, 0) AS row_count,
+            COALESCE(dataset_counts.seed_count, 0) AS seed_count,
+            COALESCE(dataset_counts.empty_seed_dataset_count, 0) AS empty_seed_dataset_count,
+            COALESCE(traffic_counts.call_count, 0) AS call_count,
+            traffic_counts.last_call_at
+        FROM server s
+        LEFT JOIN dataset_counts ON dataset_counts.server_id = s.id
+        LEFT JOIN endpoint_counts ON endpoint_counts.server_id = s.id
+        LEFT JOIN traffic_counts ON traffic_counts.target_slug = s.slug
+        ORDER BY s.slug ASC
+        """
+    ).fetchall()
+    cohort: list[dict[str, Any]] = []
+    for row in rows:
+        dataset_count = int(row["dataset_count"])
+        row_count = int(row["row_count"])
+        seed_count = int(row["seed_count"])
+        slug = str(row["slug"])
+        cohort.append(
+            {
+                "id": int(row["id"]),
+                "slug": slug,
+                "name": str(row["name"]),
+                "description": str(row["description"]),
+                "auth_mode": str(row["auth_mode"]),
+                "mcp_url": f"{base_url}/mcp/{slug}",
+                "rest_url": f"{base_url}/mock/{slug}",
+                "swagger_url": f"{base_url}/api/servers/{int(row['id'])}/swagger",
+                "dataset_count": dataset_count,
+                "endpoint_count": int(row["endpoint_count"]),
+                "row_count": row_count,
+                "seed_count": seed_count,
+                "seeded": dataset_count >= 1 and int(row["empty_seed_dataset_count"]) == 0,
+                "in_sync": row_count == seed_count,
+                "call_count": int(row["call_count"]),
+                "last_call_at": row["last_call_at"],
+            }
+        )
+    return cohort
+
+
 def create_server(
     conn: sqlite3.Connection,
     slug: str,
@@ -367,6 +458,45 @@ def reset_to_seed(conn: sqlite3.Connection, dataset_id: int) -> dict[str, Any]:
         count = store.reset_to_seed(conn, dataset_id)
     logger.info(f"reset dataset {dataset['key']!r} to {count} seed rows")
     return get_dataset(conn, dataset_id)
+
+
+def _servers_for_reset(conn: sqlite3.Connection, prefix: str | None) -> list[dict[str, Any]]:
+    if prefix is None:
+        rows = conn.execute("SELECT id, slug FROM server ORDER BY slug ASC").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, slug FROM server WHERE substr(slug, 1, ?) = ? ORDER BY slug ASC",
+            (len(prefix), prefix),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def reset_all_to_seed(conn: sqlite3.Connection, prefix: str | None = None) -> dict[str, Any]:
+    reset: list[dict[str, Any]] = []
+    with transaction(conn):
+        for server in _servers_for_reset(conn, prefix):
+            server_id = int(server["id"])
+            datasets = store.list_datasets(conn, server_id)
+            row_count = 0
+            for dataset in datasets:
+                reset_dataset = reset_to_seed(conn, int(dataset["id"]))
+                row_count += int(reset_dataset["row_count"])
+            reset.append(
+                {
+                    "server_id": server_id,
+                    "slug": str(server["slug"]),
+                    "datasets": len(datasets),
+                    "rows": row_count,
+                }
+            )
+
+    logger.info(f"reset {len(reset)} servers to seed")
+    return {
+        "reset": reset,
+        "server_count": len(reset),
+        "dataset_count": sum(int(server["datasets"]) for server in reset),
+        "row_count": sum(int(server["rows"]) for server in reset),
+    }
 
 
 def save_as_seed(conn: sqlite3.Connection, dataset_id: int) -> dict[str, Any]:
@@ -627,6 +757,34 @@ def get_traffic(
     conn: sqlite3.Connection, target_slug: str | None = None, limit: int = 100
 ) -> list[dict[str, Any]]:
     return store.get_traffic(conn, limit=limit, target_slug=target_slug)
+
+
+def get_traffic_summary(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            target_slug,
+            COUNT(*) AS call_count,
+            SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS ok_count,
+            SUM(CASE WHEN status = 'ok' THEN 0 ELSE 1 END) AS error_count,
+            MAX(created_at) AS last_call_at,
+            ROUND(AVG(duration_ms), 0) AS avg_duration_ms
+        FROM call_log
+        GROUP BY target_slug
+        ORDER BY target_slug IS NULL ASC, call_count DESC, target_slug ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "target_slug": row["target_slug"],
+            "call_count": int(row["call_count"]),
+            "ok_count": int(row["ok_count"]),
+            "error_count": int(row["error_count"]),
+            "last_call_at": row["last_call_at"],
+            "avg_duration_ms": int(row["avg_duration_ms"] or 0),
+        }
+        for row in rows
+    ]
 
 
 def clear_traffic(conn: sqlite3.Connection) -> None:

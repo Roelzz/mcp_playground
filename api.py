@@ -51,6 +51,10 @@ class BulkCloneServerRequest(BaseModel):
     start: int = 1
 
 
+class ResetAllToSeedRequest(BaseModel):
+    prefix: str | None = None
+
+
 def _assert_tool_allowed(
     conn: sqlite3.Connection, slug: str, tool_name: str, principal: Principal
 ) -> None:
@@ -105,6 +109,20 @@ def bulk_clone_server(
 @router.get("/catalog")
 def get_catalog(conn: sqlite3.Connection = Conn, _: Principal = Admin) -> list[dict[str, Any]]:
     return _handle(service.get_catalog, conn)
+
+
+@router.get("/cohort")
+def get_cohort(conn: sqlite3.Connection = Conn, _: Principal = Admin) -> list[dict[str, Any]]:
+    return _handle(service.get_cohort, conn)
+
+
+@router.post("/servers/reset-all-to-seed")
+def reset_all_to_seed(
+    body: ResetAllToSeedRequest | None = None,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Write,
+) -> dict[str, Any]:
+    return _handle(service.reset_all_to_seed, conn, body.prefix if body is not None else None)
 
 
 @router.get("/servers/{server_id}")
@@ -325,6 +343,13 @@ def get_traffic(
     target_slug: str | None = None, conn: sqlite3.Connection = Conn, _: Principal = Admin
 ) -> list[dict[str, Any]]:
     return _handle(service.get_traffic, conn, target_slug)
+
+
+@router.get("/traffic/summary")
+def get_traffic_summary(
+    conn: sqlite3.Connection = Conn, _: Principal = Admin
+) -> list[dict[str, Any]]:
+    return _handle(service.get_traffic_summary, conn)
 
 
 @router.delete("/traffic", status_code=204)

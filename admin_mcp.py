@@ -139,6 +139,10 @@ def _get_catalog(conn: sqlite3.Connection) -> Any:
     return _call_service(service.get_catalog, conn)
 
 
+def _get_cohort(conn: sqlite3.Connection) -> Any:
+    return _call_service(service.get_cohort, conn)
+
+
 def _update_server(conn: sqlite3.Connection, server_id: int, **kwargs: Any) -> Any:
     return _call_service(service.update_server, conn, server_id, **_supplied(kwargs))
 
@@ -256,6 +260,15 @@ def _reset_to_seed(
     if not confirm:
         return _confirm_required(f"live rows in dataset {dataset_id}")
     return _call_service(service.reset_to_seed, conn, dataset_id)
+
+
+def _reset_all_to_seed(
+    conn: sqlite3.Connection, prefix: str | None = None, confirm: bool = False
+) -> Any:
+    would_affect = f"servers with slug prefix {prefix!r}" if prefix is not None else "all servers"
+    if not confirm:
+        return _confirm_required(would_affect)
+    return _call_service(service.reset_all_to_seed, conn, prefix)
 
 
 def _save_as_seed(
@@ -386,6 +399,10 @@ def _get_traffic(
     return _call_service(service.get_traffic, conn, target_slug, limit)
 
 
+def _get_traffic_summary(conn: sqlite3.Connection) -> Any:
+    return _call_service(service.get_traffic_summary, conn)
+
+
 def _clear_traffic(conn: sqlite3.Connection, confirm: bool = False) -> dict[str, Any]:
     if not confirm:
         return _confirm_required("all recorded traffic logs")
@@ -436,6 +453,7 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
         _bulk_clone_server,
     ),
     ("get_catalog", "List mock MCP servers with catalog counts.", [], _get_catalog),
+    ("get_cohort", "List bootcamp handout details for all mock servers.", [], _get_cohort),
     (
         "update_server",
         "Update selected fields on a mock MCP server.",
@@ -538,6 +556,15 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
             _param("confirm", bool, "Set true to reset live rows.", False),
         ],
         _reset_to_seed,
+    ),
+    (
+        "reset_all_to_seed",
+        "Reset all matching mock servers to their seed snapshots when confirmed.",
+        [
+            _param("prefix", str | None, "Optional literal slug prefix filter.", None),
+            _param("confirm", bool, "Set true to reset matching servers.", False),
+        ],
+        _reset_all_to_seed,
     ),
     (
         "save_as_seed",
@@ -675,6 +702,12 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
             _param("limit", int, "Maximum number of log entries.", 100),
         ],
         _get_traffic,
+    ),
+    (
+        "get_traffic_summary",
+        "Aggregate recorded traffic by target slug.",
+        [],
+        _get_traffic_summary,
     ),
     (
         "clear_traffic",

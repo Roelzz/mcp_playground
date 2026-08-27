@@ -18,6 +18,7 @@ EXPECTED_TOOL_NAMES = {
     "clone_server",
     "bulk_clone_server",
     "get_catalog",
+    "get_cohort",
     "update_server",
     "delete_server",
     "get_connection_info",
@@ -30,6 +31,7 @@ EXPECTED_TOOL_NAMES = {
     "replace_rows",
     "add_rows",
     "reset_to_seed",
+    "reset_all_to_seed",
     "save_as_seed",
     "list_endpoints",
     "get_endpoint",
@@ -44,6 +46,7 @@ EXPECTED_TOOL_NAMES = {
     "set_llm_responses",
     "call_tool",
     "get_traffic",
+    "get_traffic_summary",
     "clear_traffic",
 }
 
