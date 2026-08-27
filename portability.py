@@ -66,6 +66,9 @@ def build_swagger(conn: sqlite3.Connection, server_id: int, base_url: str) -> di
         if body_definition is not None:
             definitions[body_definition] = _schema_for_tool_params(endpoint, dataset)
 
+        expand_names = [
+            e["name"] for e in service.available_expands(conn, int(endpoint["dataset_id"]))
+        ]
         summary = endpoint.get("description") or tool_name.replace("_", " ").title()
         path = str(endpoint["path"])
         method = str(endpoint["method"]).lower()
@@ -74,7 +77,9 @@ def build_swagger(conn: sqlite3.Connection, server_id: int, base_url: str) -> di
             "summary": summary,
             "x-ms-summary": summary,
             "description": _operation_description(endpoint, dataset),
-            "parameters": _parameters_for_endpoint(endpoint, dataset, body_definition),
+            "parameters": _parameters_for_endpoint(
+                endpoint, dataset, body_definition, expand_names
+            ),
             "responses": _responses_for_endpoint(endpoint, dataset),
         }
 
@@ -111,7 +116,7 @@ def build_bundle(conn: sqlite3.Connection, server_id: int) -> dict[str, Any]:
 
     bundle = {
         "format": "mcp-playground-server",
-        "version": 1,
+        "version": 2,
         "exported_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "server": {
             "slug": server["slug"],
@@ -131,6 +136,7 @@ def build_bundle(conn: sqlite3.Connection, server_id: int) -> dict[str, Any]:
             }
             for endpoint in service.list_endpoints(conn, server_id)
         ],
+        "relationships": _bundle_relationships(conn, server_id, dataset_keys),
     }
     logger.info(f"exported bundle for server {server['slug']!r} (id={server_id})")
     return bundle
@@ -184,6 +190,36 @@ def import_bundle(
                 str(endpoint_spec.get("description") or ""),
                 dataset_id_by_key[dataset_key],
                 _string_list(endpoint_spec.get("summary_fields", []), "endpoint.summary_fields"),
+            )
+
+        raw_rels = bundle.get("relationships")
+        rels_spec: list[Any] = raw_rels if isinstance(raw_rels, list) else []
+        for rel_spec in rels_spec:
+            if not isinstance(rel_spec, dict):
+                continue
+            src_key = rel_spec.get("source_dataset_key")
+            tgt_key = rel_spec.get("target_dataset_key")
+            if src_key not in dataset_id_by_key:
+                raise service.ServiceError(
+                    f"relationship references unknown dataset key {src_key!r}"
+                )
+            if tgt_key not in dataset_id_by_key:
+                raise service.ServiceError(
+                    f"relationship references unknown dataset key {tgt_key!r}"
+                )
+            service.create_relationship(
+                conn,
+                server_id,
+                name=str(rel_spec.get("name") or ""),
+                source_dataset_id=dataset_id_by_key[src_key],
+                source_field=str(rel_spec.get("source_field") or ""),
+                target_dataset_id=dataset_id_by_key[tgt_key],
+                target_field=str(rel_spec.get("target_field") or ""),
+                relation_type=str(rel_spec.get("relation_type") or "many_to_one"),
+                expand_name=str(rel_spec.get("expand_name") or ""),
+                inverse_expand_name=rel_spec.get("inverse_expand_name"),
+                required=bool(rel_spec.get("required", False)),
+                description=rel_spec.get("description"),
             )
 
     imported = service.get_server(conn, server_id)
@@ -299,12 +335,17 @@ def _schema_for_tool_response(endpoint: dict[str, Any], dataset: dict[str, Any])
 
 
 def _parameters_for_endpoint(
-    endpoint: dict[str, Any], dataset: dict[str, Any], body_definition: str | None
+    endpoint: dict[str, Any],
+    dataset: dict[str, Any],
+    body_definition: str | None,
+    expand_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     tool_type = str(endpoint["tool_type"])
     parameters = _path_parameters(str(endpoint["path"]), dataset)
     if tool_type in {"list", "search"}:
         parameters.extend(_query_parameters(tool_type, dataset))
+    if tool_type in {"list", "search", "get"}:
+        parameters.append(_expand_parameter(expand_names or []))
     if body_definition is not None:
         parameters.append(_body_parameter(endpoint, body_definition))
     return parameters
@@ -354,6 +395,28 @@ def _query_parameters(tool_type: str, dataset: dict[str, Any]) -> list[dict[str,
             }
         )
     return parameters
+
+
+def _expand_parameter(expand_names: list[str]) -> dict[str, Any]:
+    if expand_names:
+        desc = (
+            "Comma-separated expand names to inline related rows into each result. "
+            f"Available for this dataset: {', '.join(expand_names)}."
+        )
+    else:
+        desc = (
+            "Comma-separated expand names to inline related rows into each result. "
+            "Available names differ per dataset."
+        )
+    return {
+        "name": "expand",
+        "in": "query",
+        "required": False,
+        "type": "string",
+        "description": desc,
+        "x-ms-summary": "Expand",
+        "x-ms-visibility": "advanced",
+    }
 
 
 def _body_parameter(endpoint: dict[str, Any], body_definition: str) -> dict[str, Any]:
@@ -480,12 +543,34 @@ def _strip_row_ids(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_clean_row(row) for row in rows]
 
 
+def _bundle_relationships(
+    conn: sqlite3.Connection, server_id: int, dataset_key_by_id: dict[int, str]
+) -> list[dict[str, Any]]:
+    result = []
+    for rel in service.list_relationships(conn, server_id):
+        result.append(
+            {
+                "name": rel["name"],
+                "source_dataset_key": dataset_key_by_id[int(rel["source_dataset_id"])],
+                "source_field": rel["source_field"],
+                "target_dataset_key": dataset_key_by_id[int(rel["target_dataset_id"])],
+                "target_field": rel["target_field"],
+                "relation_type": rel["relation_type"],
+                "expand_name": rel["expand_name"],
+                "inverse_expand_name": rel.get("inverse_expand_name"),
+                "required": bool(rel.get("required", False)),
+                "description": str(rel.get("description") or ""),
+            }
+        )
+    return result
+
+
 def _validate_bundle(bundle: dict[str, Any]) -> None:
     if not isinstance(bundle, dict):
         raise service.ServiceError("bundle must be a JSON object")
     if bundle.get("format") != "mcp-playground-server":
         raise service.ServiceError("unsupported bundle format")
-    if bundle.get("version") != 1:
+    if bundle.get("version") not in {1, 2}:
         raise service.ServiceError("unsupported bundle version")
     if not isinstance(bundle.get("server"), dict):
         raise service.ServiceError("bundle.server must be an object")

@@ -286,7 +286,7 @@ def test_bundle_export_strips_ids_row_ids_and_secrets(client: TestClient) -> Non
     serialized = json.dumps(bundle)
 
     assert bundle["format"] == "mcp-playground-server"
-    assert bundle["version"] == 1
+    assert bundle["version"] == 2
     _assert_no_key(bundle, {"id", "server_id", "dataset_id", "_row_id"})
     for forbidden in ("api_key", "secret", "token", "password", "key_hash"):
         assert forbidden not in serialized.lower()
@@ -367,3 +367,243 @@ def test_import_route_conflict_and_bad_bundle_errors(client: TestClient) -> None
     wrapped = client.post("/api/servers/import", json={"bundle": bundle, "slug": "wrapped-copy"})
     assert wrapped.status_code == 201, wrapped.text
     assert wrapped.json()["server"]["slug"] == "wrapped-copy"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for relationship / expand tests
+# ---------------------------------------------------------------------------
+
+
+def _build_server_with_relationships(
+    conn: sqlite3.Connection,
+    slug: str = "acme-with-rels",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    server = _build_server(conn, slug)
+    datasets = service.list_datasets(conn, server["id"])
+    orders = next(d for d in datasets if d["key"] == "orders")
+    empty = next(d for d in datasets if d["key"] == "empty")
+    rel = service.create_relationship(
+        conn,
+        server["id"],
+        name="orders_empty",
+        source_dataset_id=orders["id"],
+        source_field="order_number",
+        target_dataset_id=empty["id"],
+        target_field="id",
+        relation_type="many_to_one",
+        expand_name="empty_item",
+        inverse_expand_name="order_list",
+        required=False,
+        description="Test relationship",
+    )
+    return server, rel
+
+
+def _has_ref_cycle(swagger: dict[str, Any]) -> bool:
+    definitions = swagger.get("definitions", {})
+
+    def collect_refs(obj: Any) -> list[str]:
+        refs: list[str] = []
+        if isinstance(obj, dict):
+            if "$ref" in obj and isinstance(obj["$ref"], str) and obj["$ref"].startswith(
+                "#/definitions/"
+            ):
+                refs.append(obj["$ref"][len("#/definitions/") :])
+            for v in obj.values():
+                refs.extend(collect_refs(v))
+        elif isinstance(obj, list):
+            for item in obj:
+                refs.extend(collect_refs(item))
+        return refs
+
+    adj = {name: collect_refs(defn) for name, defn in definitions.items()}
+
+    def dfs(node: str, visited: set[str], stack: set[str]) -> bool:
+        visited.add(node)
+        stack.add(node)
+        for neighbour in adj.get(node, []):
+            if neighbour in stack:
+                return True
+            if neighbour not in visited and dfs(neighbour, visited, stack):
+                return True
+        stack.discard(node)
+        return False
+
+    visited: set[str] = set()
+    for name in definitions:
+        if name not in visited and dfs(name, visited, set()):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: bundle export / import with relationships
+# ---------------------------------------------------------------------------
+
+
+def test_bundle_export_includes_relationships_by_dataset_key(client: TestClient) -> None:
+    conn = _conn(client)
+    server, rel = _build_server_with_relationships(conn)
+
+    bundle = portability.build_bundle(conn, server["id"])
+
+    assert bundle["version"] == 2
+    assert "relationships" in bundle
+    rels = bundle["relationships"]
+    assert len(rels) == 1
+    exported = rels[0]
+    assert exported["name"] == "orders_empty"
+    assert exported["source_dataset_key"] == "orders"
+    assert exported["target_dataset_key"] == "empty"
+    assert exported["expand_name"] == "empty_item"
+    assert exported["inverse_expand_name"] == "order_list"
+    assert exported["relation_type"] == "many_to_one"
+    assert exported["required"] is False
+    # Must not contain numeric IDs
+    _assert_no_key(bundle, {"id", "server_id", "dataset_id", "_row_id"})
+    assert "source_dataset_id" not in exported
+    assert "target_dataset_id" not in exported
+
+
+def test_bundle_export_server_with_no_relationships(client: TestClient) -> None:
+    conn = _conn(client)
+    server = _build_server(conn)
+
+    bundle = portability.build_bundle(conn, server["id"])
+
+    assert bundle["version"] == 2
+    assert bundle["relationships"] == []
+
+
+def test_v1_bundle_imports_cleanly(client: TestClient) -> None:
+    conn = _conn(client)
+    v1_bundle = {
+        "format": "mcp-playground-server",
+        "version": 1,
+        "exported_at": "2025-01-01T00:00:00+00:00",
+        "server": {"slug": "v1-test", "name": "V1 Test", "description": "", "auth_mode": "none"},
+        "datasets": [],
+        "endpoints": [],
+    }
+
+    summary = portability.import_bundle(conn, v1_bundle)
+
+    assert summary["server"]["slug"] == "v1-test"
+    imported_rels = service.list_relationships(conn, summary["server"]["id"])
+    assert imported_rels == []
+
+
+def test_v2_round_trip_preserves_relationships(client: TestClient) -> None:
+    conn = _conn(client)
+    server, _rel = _build_server_with_relationships(conn)
+
+    bundle = portability.build_bundle(conn, server["id"])
+    assert bundle["version"] == 2
+
+    summary = portability.import_bundle(conn, bundle, slug="acme-copy")
+    imported_server = summary["server"]
+
+    imported_rels = service.list_relationships(conn, imported_server["id"])
+    assert len(imported_rels) == 1
+    imported_rel = imported_rels[0]
+    assert imported_rel["name"] == "orders_empty"
+    assert imported_rel["expand_name"] == "empty_item"
+    assert imported_rel["inverse_expand_name"] == "order_list"
+    assert imported_rel["relation_type"] == "many_to_one"
+    assert imported_rel["source_field"] == "order_number"
+    assert imported_rel["target_field"] == "id"
+
+
+def test_imported_relationship_ids_differ_and_point_at_new_datasets(
+    client: TestClient,
+) -> None:
+    conn = _conn(client)
+    server, original_rel = _build_server_with_relationships(conn)
+
+    bundle = portability.build_bundle(conn, server["id"])
+    summary = portability.import_bundle(conn, bundle, slug="acme-copy-2")
+    imported_server = summary["server"]
+
+    # Relationship ID must differ from the original
+    imported_rels = service.list_relationships(conn, imported_server["id"])
+    assert len(imported_rels) == 1
+    imported_rel = imported_rels[0]
+    assert imported_rel["id"] != original_rel["id"]
+
+    # source/target dataset IDs must point at the NEW server's datasets
+    imported_datasets = service.list_datasets(conn, imported_server["id"])
+    imported_dataset_ids = {d["id"] for d in imported_datasets}
+    original_dataset_ids = {
+        d["id"] for d in service.list_datasets(conn, server["id"])
+    }
+    assert imported_rel["source_dataset_id"] in imported_dataset_ids
+    assert imported_rel["target_dataset_id"] in imported_dataset_ids
+    assert imported_rel["source_dataset_id"] not in original_dataset_ids
+    assert imported_rel["target_dataset_id"] not in original_dataset_ids
+
+
+def test_bundle_unknown_dataset_key_fails_atomically(client: TestClient) -> None:
+    conn = _conn(client)
+    server = _build_server(conn, "atomic-test")
+
+    bundle = portability.build_bundle(conn, server["id"])
+    bundle["relationships"] = [
+        {
+            "name": "bad_rel",
+            "source_dataset_key": "nonexistent",
+            "source_field": "id",
+            "target_dataset_key": "orders",
+            "target_field": "order_number",
+            "relation_type": "many_to_one",
+            "expand_name": "bad_expand",
+            "inverse_expand_name": None,
+            "required": False,
+            "description": "",
+        }
+    ]
+
+    with pytest.raises(service.ServiceError, match="unknown dataset key"):
+        portability.import_bundle(conn, bundle, slug="should-not-exist")
+
+    # No orphan server should be left behind
+    all_slugs = [s["slug"] for s in service.list_servers(conn)]
+    assert "should-not-exist" not in all_slugs
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Swagger expand parameter
+# ---------------------------------------------------------------------------
+
+
+def test_swagger_read_operations_have_expand_parameter(client: TestClient) -> None:
+    conn = _conn(client)
+    server = _build_server(conn)
+    swagger = portability.build_swagger(conn, server["id"], "http://localhost:2009")
+
+    for op_id in ("list_orders", "search_orders", "get_order", "list_empty"):
+        op = _operation(swagger, op_id)
+        param = _parameter(op, "expand")
+        assert param["in"] == "query"
+        assert param["required"] is False
+        assert param["type"] == "string"
+        assert param["x-ms-visibility"] == "advanced"
+        assert param["x-ms-summary"]
+
+
+def test_swagger_write_operations_no_expand_parameter(client: TestClient) -> None:
+    conn = _conn(client)
+    server = _build_server(conn)
+    swagger = portability.build_swagger(conn, server["id"], "http://localhost:2009")
+
+    for op_id in ("create_order", "update_order", "delete_order"):
+        op = _operation(swagger, op_id)
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "expand" not in param_names
+
+
+def test_swagger_no_recursive_refs(client: TestClient) -> None:
+    conn = _conn(client)
+    server = _build_server(conn)
+    swagger = portability.build_swagger(conn, server["id"], "http://localhost:2009")
+
+    assert not _has_ref_cycle(swagger)
