@@ -4,6 +4,7 @@ import sqlite3
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 import service
 from auth import Principal, get_conn, require_admin, require_write
@@ -39,6 +40,17 @@ Write = Depends(require_write)
 READ_TOOL_TYPES = frozenset({"list", "get", "search"})
 
 
+class CloneServerRequest(BaseModel):
+    slug: str = Field(min_length=1, max_length=64)
+    name: str | None = None
+
+
+class BulkCloneServerRequest(BaseModel):
+    prefix: str
+    count: int
+    start: int = 1
+
+
 def _assert_tool_allowed(
     conn: sqlite3.Connection, slug: str, tool_name: str, principal: Principal
 ) -> None:
@@ -68,6 +80,31 @@ def create_server(
     return _handle(
         service.create_server, conn, body.slug, body.name, body.description, body.auth_mode
     )
+
+
+@router.post("/servers/{server_id}/clone", status_code=201)
+def clone_server(
+    server_id: int,
+    body: CloneServerRequest,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Write,
+) -> dict[str, Any]:
+    return _handle(service.clone_server, conn, server_id, body.slug, body.name)
+
+
+@router.post("/servers/{server_id}/bulk-clone", status_code=201)
+def bulk_clone_server(
+    server_id: int,
+    body: BulkCloneServerRequest,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Write,
+) -> dict[str, list[dict[str, Any]]]:
+    return _handle(service.bulk_clone_server, conn, server_id, body.prefix, body.count, body.start)
+
+
+@router.get("/catalog")
+def get_catalog(conn: sqlite3.Connection = Conn, _: Principal = Admin) -> list[dict[str, Any]]:
+    return _handle(service.get_catalog, conn)
 
 
 @router.get("/servers/{server_id}")

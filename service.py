@@ -111,6 +111,117 @@ def get_server_by_slug(conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
     return server
 
 
+def _clone_server_rows(
+    conn: sqlite3.Connection,
+    source: dict[str, Any],
+    slug: str,
+    name: str,
+) -> int:
+    new_server_id = store.create_server(
+        conn,
+        slug,
+        name,
+        str(source["description"]),
+        str(source["auth_mode"]),
+    )
+    dataset_map: dict[int, int] = {}
+
+    for dataset in store.list_datasets(conn, int(source["id"])):
+        new_dataset_id = store.create_dataset(
+            conn,
+            new_server_id,
+            str(dataset["key"]),
+            str(dataset["id_field"]),
+        )
+        dataset_map[int(dataset["id"])] = new_dataset_id
+        conn.execute(
+            "INSERT INTO dataset_row (dataset_id, data) "
+            "SELECT ?, data FROM dataset_row WHERE dataset_id = ? ORDER BY id",
+            (new_dataset_id, int(dataset["id"])),
+        )
+        conn.execute(
+            "INSERT INTO dataset_seed_row (dataset_id, data) "
+            "SELECT ?, data FROM dataset_seed_row WHERE dataset_id = ? ORDER BY id",
+            (new_dataset_id, int(dataset["id"])),
+        )
+
+    for endpoint in store.list_endpoints(conn, int(source["id"])):
+        source_dataset_id = int(endpoint["dataset_id"])
+        if source_dataset_id not in dataset_map:
+            raise ServiceError(
+                f"endpoint {endpoint['tool_name']!r} references dataset outside source server"
+            )
+        store.create_endpoint(
+            conn,
+            new_server_id,
+            str(endpoint["path"]),
+            str(endpoint["method"]),
+            str(endpoint["tool_name"]),
+            str(endpoint["description"]),
+            dataset_map[source_dataset_id],
+            endpoint["summary_fields"],
+        )
+
+    return new_server_id
+
+
+def clone_server(
+    conn: sqlite3.Connection,
+    server_id: int,
+    slug: str,
+    name: str | None = None,
+) -> dict[str, Any]:
+    source = _require_server(conn, server_id)
+    _validate_slug(slug)
+    clone_name = name if name is not None and name.strip() else str(source["name"])
+    with transaction(conn):
+        if store.get_server_by_slug(conn, slug) is not None:
+            raise Conflict(f"server slug {slug!r} already exists")
+        new_server_id = _clone_server_rows(conn, source, slug, clone_name)
+    logger.info(f"cloned server {source['slug']!r} to {slug!r} (id={new_server_id})")
+    return get_server(conn, new_server_id)
+
+
+def _bulk_clone_targets(prefix: str, count: int, start: int) -> list[tuple[str, str]]:
+    largest = start + count - 1
+    width = max(2, len(str(largest)))
+    return [
+        (f"{prefix}{counter:0{width}d}", f"{counter:0{width}d}")
+        for counter in range(start, start + count)
+    ]
+
+
+def bulk_clone_server(
+    conn: sqlite3.Connection,
+    server_id: int,
+    prefix: str,
+    count: int,
+    start: int = 1,
+) -> dict[str, list[dict[str, Any]]]:
+    if count < 1 or count > 50:
+        raise ServiceError("count must be between 1 and 50")
+    source = _require_server(conn, server_id)
+    targets = _bulk_clone_targets(prefix, count, start)
+    for slug, _ in targets:
+        _validate_slug(slug)
+
+    with transaction(conn):
+        existing = [slug for slug, _ in targets if store.get_server_by_slug(conn, slug) is not None]
+        if existing:
+            raise Conflict(f"server slug {existing[0]!r} already exists")
+        server_ids = [
+            _clone_server_rows(conn, source, slug, f"{source['name']} {padded}")
+            for slug, padded in targets
+        ]
+
+    logger.info(f"bulk cloned server {source['slug']!r} into {len(server_ids)} servers")
+    return {"created": [get_server(conn, new_server_id) for new_server_id in server_ids]}
+
+
+def get_catalog(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return list_servers(conn)
+
+
 def create_server(
     conn: sqlite3.Connection,
     slug: str,

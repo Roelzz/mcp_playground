@@ -116,6 +116,29 @@ def _create_server(
     return _call_service(service.create_server, conn, slug, name, description, auth_mode)
 
 
+def _clone_server(
+    conn: sqlite3.Connection,
+    server_id: int,
+    slug: str,
+    name: str | None = None,
+) -> Any:
+    return _call_service(service.clone_server, conn, server_id, slug, name)
+
+
+def _bulk_clone_server(
+    conn: sqlite3.Connection,
+    server_id: int,
+    prefix: str,
+    count: int,
+    start: int = 1,
+) -> Any:
+    return _call_service(service.bulk_clone_server, conn, server_id, prefix, count, start)
+
+
+def _get_catalog(conn: sqlite3.Connection) -> Any:
+    return _call_service(service.get_catalog, conn)
+
+
 def _update_server(conn: sqlite3.Connection, server_id: int, **kwargs: Any) -> Any:
     return _call_service(service.update_server, conn, server_id, **_supplied(kwargs))
 
@@ -391,6 +414,28 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
         ],
         _create_server,
     ),
+    (
+        "clone_server",
+        "Deep-copy a mock MCP server to a new slug.",
+        [
+            _param("server_id", int, "Source server ID."),
+            _param("slug", str, "Target URL slug for the clone."),
+            _param("name", str | None, "Optional display name for the clone.", None),
+        ],
+        _clone_server,
+    ),
+    (
+        "bulk_clone_server",
+        "Deep-copy a mock MCP server into numbered team servers.",
+        [
+            _param("server_id", int, "Source server ID."),
+            _param("prefix", str, "Target slug prefix before the padded counter."),
+            _param("count", int, "Number of clones to create, from 1 to 50."),
+            _param("start", int, "First counter value.", 1),
+        ],
+        _bulk_clone_server,
+    ),
+    ("get_catalog", "List mock MCP servers with catalog counts.", [], _get_catalog),
     (
         "update_server",
         "Update selected fields on a mock MCP server.",
