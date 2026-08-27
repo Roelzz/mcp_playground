@@ -1,0 +1,17 @@
+services:
+  playground:
+    build: .
+    ports:
+      - "2009:2009"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      DB_PATH: /data/playground.db
+    volumes:
+      - playground-data:/data
+    restart: unless-stopped
+
+volumes:
+  playground-data:
