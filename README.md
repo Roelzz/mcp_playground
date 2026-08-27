@@ -76,6 +76,8 @@ curl -X DELETE http://localhost:2009/mock/contoso-orders/orders/1001
 
 Query string, JSON body and path placeholders are merged into one flat parameter set. Create returns `201`, everything else returns `200`.
 
+The **Test console** in the admin UI calls this surface directly. Pick `REST — /mock/{slug}` as the surface to exercise writes and see the real HTTP status plus a copyable `curl` line. The `Executor` surface is admin-gated and read-only, so it cannot test create, update or delete.
+
 When a server's authentication is set to API key, send the key as `X-API-Key: <key>` or `Authorization: Bearer <key>`.
 
 ### Importing into Power Platform as a custom connector

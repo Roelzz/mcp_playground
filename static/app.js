@@ -35,6 +35,12 @@
     trafficTimer: null,
     testResult: null,
     testElapsed: null,
+    testMode: "rest",
+    testTool: null,
+    testParams: "{}",
+    testStatus: null,
+    testCurl: null,
+    testApiKey: "",
     editingServerId: null,
     editingDatasetId: null,
     editingEndpointId: null,
@@ -396,8 +402,65 @@
 
   function renderTestConsole() {
     var server = selectedServer();
-    return pageHeader("Test console", "Call a server tool through the same API path Copilot Studio uses and inspect timing.") + serverSelectHtml() +
-      (!server ? "" : "<div class=\"two-col\"><section class=\"panel\"><form class=\"form-grid\" data-form=\"tool-call\"><div class=\"form-row\"><label>Tool</label><select name=\"tool_name\" id=\"tool-select\">" + state.endpoints.map(function (e) { return "<option value=\"" + esc(e.tool_name) + "\">" + esc(e.tool_name) + " — " + esc(e.method) + " " + esc(e.path) + "</option>"; }).join("") + "</select></div><div id=\"tool-help\" class=\"tabs-note\"></div><div class=\"form-row\"><label>Parameters JSON</label><textarea class=\"json\" name=\"params\">{}</textarea></div><button class=\"btn primary\" type=\"submit\">Call tool</button></form></section><section class=\"panel\"><h2>Result</h2>" + (state.testResult == null ? "<div class=\"empty\">No call yet.</div>" : "<p class=\"help\">Elapsed: " + esc(state.testElapsed) + " ms</p><pre class=\"prebox\">" + esc(pretty(state.testResult)) + "</pre>") + "</section></div>");
+    var header = pageHeader("Test console", "Call an endpoint over plain REST the way a custom connector does, or through the internal executor path.") + serverSelectHtml();
+    if (!server) return header;
+    var selected = state.testTool || (state.endpoints[0] ? state.endpoints[0].tool_name : "");
+    var tools = state.endpoints.map(function (e) {
+      return "<option value=\"" + esc(e.tool_name) + "\"" + (e.tool_name === selected ? " selected" : "") + ">" + esc(e.tool_name) + " — " + esc(e.method) + " " + esc(e.path) + "</option>";
+    }).join("");
+    var modes = [["rest", "REST — /mock/" + server.slug], ["executor", "Executor — /api/servers/…/tools/…/call"]].map(function (m) {
+      return "<option value=\"" + m[0] + "\"" + (state.testMode === m[0] ? " selected" : "") + ">" + esc(m[1]) + "</option>";
+    }).join("");
+    var keyRow = state.testMode === "rest" && server.auth_mode === "api_key"
+      ? "<div class=\"form-row\"><label>API key</label><input name=\"api_key\" value=\"" + esc(state.testApiKey) + "\" placeholder=\"mcpp_…\"><span class=\"help\">This server requires a key. Sent as <code>X-API-Key</code>; the admin session cookie is not used.</span></div>"
+      : "";
+    var form = "<section class=\"panel\"><form class=\"form-grid\" data-form=\"tool-call\">" +
+      "<div class=\"form-row\"><label>Surface</label><select name=\"mode\" id=\"test-mode\">" + modes + "</select><span class=\"help\">REST is what Power Platform calls and can exercise writes. Executor is admin-gated and read-only.</span></div>" +
+      "<div class=\"form-row\"><label>Tool</label><select name=\"tool_name\" id=\"tool-select\">" + tools + "</select></div>" +
+      "<div id=\"tool-help\" class=\"tabs-note\"></div>" + keyRow +
+      "<div class=\"form-row\"><label>Parameters JSON</label><textarea class=\"json\" name=\"params\">" + esc(state.testParams) + "</textarea></div>" +
+      "<button class=\"btn primary\" type=\"submit\">Send</button></form></section>";
+    var body = state.testResult === null && state.testStatus === null
+      ? "<div class=\"empty\">No call yet.</div>"
+      : "<p class=\"help\">" + (state.testStatus === null ? "" : "<span class=\"badge" + (state.testStatus >= 400 ? " bad" : "") + "\">HTTP " + esc(state.testStatus) + "</span> · ") + "Elapsed: " + esc(state.testElapsed) + " ms</p>" +
+        (state.testCurl ? "<div class=\"url-row\"><span class=\"url-text\">" + esc(state.testCurl) + "</span><button class=\"btn small\" data-copy=\"" + esc(state.testCurl) + "\">Copy</button></div>" : "") +
+        "<pre class=\"prebox\">" + esc(pretty(state.testResult)) + "</pre>";
+    return header + "<div class=\"two-col\">" + form + "<section class=\"panel\"><h2>Result</h2>" + body + "</section></div>";
+  }
+
+  function buildRestRequest(server, endpoint, params) {
+    var rest = Object.assign({}, params);
+    var path = endpoint.path.replace(/\{([^}]+)\}/g, function (_match, name) {
+      var value = rest[name];
+      delete rest[name];
+      return encodeURIComponent(value == null ? "" : String(value));
+    });
+    var method = String(endpoint.method || "GET").toUpperCase();
+    var sendsBody = method === "POST" || method === "PUT" || method === "PATCH";
+    var query = "";
+    if (!sendsBody) {
+      var pairs = Object.keys(rest).filter(function (k) { return rest[k] != null; }).map(function (k) {
+        return encodeURIComponent(k) + "=" + encodeURIComponent(String(rest[k]));
+      });
+      if (pairs.length) query = "?" + pairs.join("&");
+    }
+    return { method: method, url: restBaseUrl(server) + path + query, body: sendsBody ? JSON.stringify(rest) : null };
+  }
+
+  function curlFor(request, apiKey) {
+    var out = "curl -X " + request.method + " '" + request.url + "'";
+    if (apiKey) out += " -H 'X-API-Key: " + apiKey + "'";
+    if (request.body != null) out += " -H 'Content-Type: application/json' -d '" + request.body + "'";
+    return out;
+  }
+
+  function captureTestForm() {
+    var form = document.querySelector("form[data-form='tool-call']");
+    if (!form) return;
+    var data = formData(form);
+    if (data.tool_name) state.testTool = data.tool_name;
+    if (data.params != null) state.testParams = data.params;
+    if (data.api_key != null) state.testApiKey = data.api_key;
   }
 
   function renderTraffic() {
@@ -580,7 +643,12 @@
     var endpoint = state.endpoints.find(function (e) { return e.tool_name === selectEl.value; });
     if (!endpoint) { help.textContent = "No tools for this server."; return; }
     var param = (endpoint.path.match(/\{([^}]+)\}/) || [])[1];
-    help.innerHTML = "<strong>" + esc(endpoint.method + " " + endpoint.path) + "</strong> · " + esc(endpoint.tool_type) + (param ? " · requires parameter <code>" + esc(param) + "</code>" : "") + (endpoint.tool_type === "search" ? " · optional <code>q</code> and <code>limit</code>" : endpoint.tool_type === "list" ? " · optional filters and <code>limit</code>" : "");
+    var hints = "<strong>" + esc(endpoint.method + " " + endpoint.path) + "</strong> · " + esc(endpoint.tool_type) + (param ? " · requires parameter <code>" + esc(param) + "</code>" : "") + (endpoint.tool_type === "search" ? " · optional <code>q</code> and <code>limit</code>" : endpoint.tool_type === "list" ? " · optional filters and <code>limit</code>" : "");
+    if (state.testMode === "rest") {
+      var sendsBody = ["POST", "PUT", "PATCH"].indexOf(String(endpoint.method).toUpperCase()) !== -1;
+      hints += "<div class=\"help\" style=\"margin-top:6px\">Calls <code>" + esc(restUrl(selectedServer(), endpoint)) + "</code>. Path placeholders are filled from the parameters; the rest go in the " + (sendsBody ? "JSON body" : "query string") + ".</div>";
+    }
+    help.innerHTML = hints;
   }
 
   function updateDatasetPreview() {
@@ -622,12 +690,23 @@
       state.selectedDatasetId = null;
       state.editingEndpointId = null;
       state.testResult = null;
+      state.testStatus = null;
+      state.testCurl = null;
+      state.testTool = null;
       await refreshForServer();
       render();
     }
     if (event.target.matches("form[data-form='endpoint'] select[name='method']")) updateToolTypePreview();
     if (event.target.matches("form[data-form='llm'] select[name='mode']")) updateProxyFields();
-    if (event.target.matches("#tool-select")) updateToolHelp();
+    if (event.target.matches("#test-mode")) {
+      captureTestForm();
+      state.testMode = event.target.value;
+      render();
+    }
+    if (event.target.matches("#tool-select")) {
+      state.testTool = event.target.value;
+      updateToolHelp();
+    }
   });
 
   document.addEventListener("submit", async function (event) {
@@ -784,10 +863,40 @@
     var data = formData(form);
     var params = JSON.parse(data.params || "{}");
     var server = selectedServer();
+    state.testMode = data.mode === "executor" ? "executor" : "rest";
+    state.testTool = data.tool_name;
+    state.testParams = data.params || "{}";
+    if (data.api_key != null) state.testApiKey = data.api_key;
     var started = performance.now();
-    var result = await api("/api/servers/" + encodeURIComponent(server.slug) + "/tools/" + encodeURIComponent(data.tool_name) + "/call", { method: "POST", body: JSON.stringify(params) });
-    state.testElapsed = Math.round(performance.now() - started);
-    state.testResult = result;
+    if (state.testMode === "rest") {
+      var endpoint = state.endpoints.find(function (e) { return e.tool_name === data.tool_name; });
+      if (!endpoint) throw new Error("Unknown tool for this server.");
+      var request = buildRestRequest(server, endpoint, params);
+      var options = { method: request.method, credentials: "omit", headers: {} };
+      if (state.testApiKey) options.headers["X-API-Key"] = state.testApiKey;
+      if (request.body != null) {
+        options.body = request.body;
+        options.headers["Content-Type"] = "application/json";
+      }
+      var response;
+      try {
+        response = await fetch(request.url, options);
+      } catch (err) {
+        toast("Network error: " + err.message, "error");
+        throw err;
+      }
+      var text = await response.text();
+      state.testElapsed = Math.round(performance.now() - started);
+      state.testStatus = response.status;
+      state.testCurl = curlFor(request, state.testApiKey);
+      try { state.testResult = text ? JSON.parse(text) : null; } catch (_err) { state.testResult = text; }
+    } else {
+      state.testCurl = null;
+      var result = await api("/api/servers/" + encodeURIComponent(server.slug) + "/tools/" + encodeURIComponent(data.tool_name) + "/call", { method: "POST", body: JSON.stringify(params) });
+      state.testElapsed = Math.round(performance.now() - started);
+      state.testStatus = 200;
+      state.testResult = result;
+    }
     render();
   }
 
