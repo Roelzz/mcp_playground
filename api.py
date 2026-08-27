@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 import service
-from auth import Principal, get_conn, require_admin
+from auth import Principal, get_conn, require_admin, require_write
 from models import (
     DatasetCreate,
     DatasetUpdate,
@@ -34,6 +34,23 @@ def _handle(fn, *args: Any, **kwargs: Any) -> Any:
 
 Conn = Depends(get_conn)
 Admin = Depends(require_admin)
+Write = Depends(require_write)
+
+READ_TOOL_TYPES = frozenset({"list", "get", "search"})
+
+
+def _assert_tool_allowed(
+    conn: sqlite3.Connection, slug: str, tool_name: str, principal: Principal
+) -> None:
+    """Readonly principals may run read-shaped tools but not create/update/delete ones."""
+    if principal.can_write:
+        return
+    server = _handle(service.get_server_by_slug, conn, slug)
+    for endpoint in _handle(service.list_endpoints, conn, server["id"]):
+        if endpoint["tool_name"] == tool_name:
+            if endpoint.get("tool_type") not in READ_TOOL_TYPES:
+                raise HTTPException(status_code=403, detail="readonly key cannot write")
+            return
 
 
 # ------------------------------------------------------------------------- servers
@@ -46,7 +63,7 @@ def list_servers(conn: sqlite3.Connection = Conn, _: Principal = Admin) -> list[
 
 @router.post("/servers", status_code=201)
 def create_server(
-    body: ServerCreate, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    body: ServerCreate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(
         service.create_server, conn, body.slug, body.name, body.description, body.auth_mode
@@ -62,13 +79,13 @@ def get_server(
 
 @router.patch("/servers/{server_id}")
 def update_server(
-    server_id: int, body: ServerUpdate, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    server_id: int, body: ServerUpdate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(service.update_server, conn, server_id, **body.model_dump(exclude_none=True))
 
 
 @router.delete("/servers/{server_id}", status_code=204)
-def delete_server(server_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin) -> None:
+def delete_server(server_id: int, conn: sqlite3.Connection = Conn, _: Principal = Write) -> None:
     _handle(service.delete_server, conn, server_id)
 
 
@@ -84,7 +101,7 @@ def list_datasets(
 
 @router.post("/servers/{server_id}/datasets", status_code=201)
 def create_dataset(
-    server_id: int, body: DatasetCreate, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    server_id: int, body: DatasetCreate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(service.create_dataset, conn, server_id, body.key, body.id_field, body.rows)
 
@@ -98,13 +115,13 @@ def get_dataset(
 
 @router.patch("/datasets/{dataset_id}")
 def update_dataset(
-    dataset_id: int, body: DatasetUpdate, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    dataset_id: int, body: DatasetUpdate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(service.update_dataset, conn, dataset_id, **body.model_dump(exclude_none=True))
 
 
 @router.delete("/datasets/{dataset_id}", status_code=204)
-def delete_dataset(dataset_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin) -> None:
+def delete_dataset(dataset_id: int, conn: sqlite3.Connection = Conn, _: Principal = Write) -> None:
     _handle(service.delete_dataset, conn, dataset_id)
 
 
@@ -120,28 +137,28 @@ def list_rows(
 
 @router.put("/datasets/{dataset_id}/rows")
 def replace_rows(
-    dataset_id: int, body: RowsPayload, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    dataset_id: int, body: RowsPayload, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(service.replace_rows, conn, dataset_id, body.rows)
 
 
 @router.post("/datasets/{dataset_id}/rows")
 def add_rows(
-    dataset_id: int, body: RowsPayload, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    dataset_id: int, body: RowsPayload, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(service.add_rows, conn, dataset_id, body.rows)
 
 
 @router.post("/datasets/{dataset_id}/reset-to-seed")
 def reset_to_seed(
-    dataset_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    dataset_id: int, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(service.reset_to_seed, conn, dataset_id)
 
 
 @router.post("/datasets/{dataset_id}/save-as-seed")
 def save_as_seed(
-    dataset_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    dataset_id: int, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(service.save_as_seed, conn, dataset_id)
 
@@ -158,7 +175,7 @@ def list_endpoints(
 
 @router.post("/servers/{server_id}/endpoints", status_code=201)
 def create_endpoint(
-    server_id: int, body: EndpointCreate, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    server_id: int, body: EndpointCreate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(
         service.create_endpoint,
@@ -182,7 +199,7 @@ def get_endpoint(
 
 @router.patch("/endpoints/{endpoint_id}")
 def update_endpoint(
-    endpoint_id: int, body: EndpointUpdate, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    endpoint_id: int, body: EndpointUpdate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(
         service.update_endpoint, conn, endpoint_id, **body.model_dump(exclude_none=True)
@@ -191,7 +208,7 @@ def update_endpoint(
 
 @router.delete("/endpoints/{endpoint_id}", status_code=204)
 def delete_endpoint(
-    endpoint_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    endpoint_id: int, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> None:
     _handle(service.delete_endpoint, conn, endpoint_id)
 
@@ -208,7 +225,7 @@ def list_llm_endpoints(
 
 @router.post("/llm-endpoints", status_code=201)
 def create_llm_endpoint(
-    body: LLMEndpointCreate, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    body: LLMEndpointCreate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(service.create_llm_endpoint, conn, **body.model_dump())
 
@@ -222,7 +239,7 @@ def get_llm_endpoint(
 
 @router.patch("/llm-endpoints/{llm_id}")
 def update_llm_endpoint(
-    llm_id: int, body: LLMEndpointUpdate, conn: sqlite3.Connection = Conn, _: Principal = Admin
+    llm_id: int, body: LLMEndpointUpdate, conn: sqlite3.Connection = Conn, _: Principal = Write
 ) -> dict[str, Any]:
     return _handle(
         service.update_llm_endpoint, conn, llm_id, **body.model_dump(exclude_none=True)
@@ -230,7 +247,7 @@ def update_llm_endpoint(
 
 
 @router.delete("/llm-endpoints/{llm_id}", status_code=204)
-def delete_llm_endpoint(llm_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin) -> None:
+def delete_llm_endpoint(llm_id: int, conn: sqlite3.Connection = Conn, _: Principal = Write) -> None:
     _handle(service.delete_llm_endpoint, conn, llm_id)
 
 
@@ -239,7 +256,7 @@ def set_llm_responses(
     llm_id: int,
     body: list[LLMResponseSpec],
     conn: sqlite3.Connection = Conn,
-    _: Principal = Admin,
+    _: Principal = Write,
 ) -> dict[str, Any]:
     return _handle(service.set_llm_responses, conn, llm_id, [r.model_dump() for r in body])
 
@@ -255,6 +272,7 @@ def call_tool(
     conn: sqlite3.Connection = Conn,
     principal: Principal = Admin,
 ) -> Any:
+    _assert_tool_allowed(conn, slug, tool_name, principal)
     return {
         "result": _handle(
             service.call_tool, conn, slug, tool_name, body or {}, "api", principal.label
@@ -273,5 +291,5 @@ def get_traffic(
 
 
 @router.delete("/traffic", status_code=204)
-def clear_traffic(conn: sqlite3.Connection = Conn, _: Principal = Admin) -> None:
+def clear_traffic(conn: sqlite3.Connection = Conn, _: Principal = Write) -> None:
     _handle(service.clear_traffic, conn)
