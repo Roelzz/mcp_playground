@@ -1,8 +1,9 @@
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import api
+import auth
 import db
 import store
 from auth import get_conn
@@ -16,6 +17,7 @@ def client(tmp_path, monkeypatch):
     app.include_router(api.router)
     app.dependency_overrides[get_conn] = lambda: conn
     with TestClient(app) as c:
+        c.conn = conn
         yield c
 
 
@@ -207,3 +209,41 @@ def test_traffic_routes_list_and_clear(client: TestClient) -> None:
     deleted = client.delete("/api/traffic")
     assert deleted.status_code == 204, deleted.text
     assert client.get("/api/traffic").json() == []
+
+
+def test_readonly_key_may_call_read_tools_but_not_write_tools(client: TestClient) -> None:
+    server = _post_server(client, slug="gated")
+    dataset = _post_dataset(client, server["id"], [{"id": 1, "customer": "Alpha"}])
+    _post_endpoint(client, server["id"], dataset["id"], "GET", "/orders", "list_orders")
+    _post_endpoint(client, server["id"], dataset["id"], "GET", "/orders/search", "search_orders")
+    _post_endpoint(client, server["id"], dataset["id"], "POST", "/orders", "create_order")
+
+    readonly = auth.Principal(label="ro", scope="readonly")
+    admin = auth.Principal(label="adm", scope="admin")
+
+    api._assert_tool_allowed(client.conn, "gated", "list_orders", readonly)
+    api._assert_tool_allowed(client.conn, "gated", "search_orders", readonly)
+    api._assert_tool_allowed(client.conn, "gated", "create_order", admin)
+
+    with pytest.raises(HTTPException) as excinfo:
+        api._assert_tool_allowed(client.conn, "gated", "create_order", readonly)
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "readonly key cannot write"
+
+
+def test_create_tool_body_is_flat_and_row_is_searchable(client: TestClient) -> None:
+    server = _post_server(client, slug="flat")
+    dataset = _post_dataset(client, server["id"], [{"id": 1, "customer": "Alpha"}])
+    _post_endpoint(client, server["id"], dataset["id"], "POST", "/orders", "create_order")
+    _post_endpoint(client, server["id"], dataset["id"], "GET", "/orders/search", "search_orders")
+
+    created = client.post(
+        "/api/servers/flat/tools/create_order/call",
+        json={"customer": "SmokeCo", "status": "open"},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["result"]["customer"] == "SmokeCo"
+
+    found = client.post("/api/servers/flat/tools/search_orders/call", json={"q": "SmokeCo"})
+    assert found.status_code == 200, found.text
+    assert [row["customer"] for row in found.json()["result"]] == ["SmokeCo"]

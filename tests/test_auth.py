@@ -251,3 +251,17 @@ def test_key_create_returns_plaintext_once_and_list_never_contains_it(
     assert len(listed_body) == 1
     assert "key" not in listed_body[0]
     assert created_body["key"] not in str(listed_body)
+
+
+def test_bootstrap_treats_blank_env_values_as_unset(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BOOTSTRAP_USER", "")
+    monkeypatch.setenv("BOOTSTRAP_PASSWORD", "   ")
+
+    auth.bootstrap(conn)
+    row = conn.execute("SELECT username, password_hash FROM admin_user").fetchone()
+
+    assert row["username"] == "admin"
+    assert not auth.verify_password("", row["password_hash"])
+    assert not auth.verify_password("   ", row["password_hash"])
