@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from loguru import logger
 
 import service
+import store
 
 __all__ = ["seed_if_empty"]
 
@@ -615,6 +616,29 @@ _FINANCE_EXPENSE_REPORTS, _FINANCE_EXPENSE_LINES, _FINANCE_COST_CENTRES_ROWS, _F
 )
 
 
+def _seed_relationships(
+    conn: sqlite3.Connection,
+    server_id: int,
+    specs: list[dict],
+) -> None:
+    for spec in specs:
+        src_ds = store.get_dataset_by_key(conn, server_id, spec["source_key"])
+        tgt_ds = store.get_dataset_by_key(conn, server_id, spec["target_key"])
+        service.create_relationship(
+            conn,
+            server_id,
+            name=spec["name"],
+            source_dataset_id=int(src_ds["id"]),  # type: ignore[index]
+            source_field=spec["source_field"],
+            target_dataset_id=int(tgt_ds["id"]),  # type: ignore[index]
+            target_field=spec["target_field"],
+            expand_name=spec["expand_name"],
+            inverse_expand_name=spec.get("inverse_expand_name"),
+            required=spec.get("required", True),
+            description=spec.get("description", ""),
+        )
+
+
 def _seed_hr_server(conn: sqlite3.Connection) -> None:
     server = service.create_server(
         conn,
@@ -737,6 +761,52 @@ def _seed_hr_server(conn: sqlite3.Connection) -> None:
         int(org_units_dataset["id"]),
         ["org_unit_id", "name", "lead_employee_id", "parent_org_unit_id"],
     )
+    _seed_relationships(
+        conn,
+        server_id,
+        [
+            {
+                "name": "employees_manager",
+                "source_key": "employees",
+                "source_field": "manager_id",
+                "target_key": "employees",
+                "target_field": "employee_id",
+                "expand_name": "manager",
+                "inverse_expand_name": "direct_reports",
+                "required": False,
+                "description": (
+                    "Employee's direct manager; null for top-of-org employees."
+                ),
+            },
+            {
+                "name": "employees_org_unit",
+                "source_key": "employees",
+                "source_field": "department",
+                "target_key": "org_units",
+                "target_field": "name",
+                "expand_name": "org_unit",
+                "inverse_expand_name": "employees",
+                "required": True,
+                "description": (
+                    "Links an employee's department to the org unit record "
+                    "with budget and lead details."
+                ),
+            },
+            {
+                "name": "time_off_requests_to_employees",
+                "source_key": "time_off_requests",
+                "source_field": "employee_id",
+                "target_key": "employees",
+                "target_field": "employee_id",
+                "expand_name": "employee",
+                "inverse_expand_name": "time_off_requests",
+                "required": True,
+                "description": (
+                    "Each time-off request is submitted by a specific employee."
+                ),
+            },
+        ],
+    )
 
 
 def _seed_it_server(conn: sqlite3.Connection) -> None:
@@ -851,6 +921,40 @@ def _seed_it_server(conn: sqlite3.Connection) -> None:
         "Use when the agent needs service ownership, criticality, or support-hour context.",
         int(services_dataset["id"]),
         ["service_id", "name", "owner_team", "criticality"],
+    )
+    _seed_relationships(
+        conn,
+        server_id,
+        [
+            {
+                "name": "tickets_to_assets",
+                "source_key": "tickets",
+                "source_field": "asset_tag",
+                "target_key": "assets",
+                "target_field": "asset_tag",
+                "expand_name": "asset",
+                "inverse_expand_name": "tickets",
+                "required": False,
+                "description": (
+                    "Links a ticket to the affected hardware asset; "
+                    "optional when no asset is involved."
+                ),
+            },
+            {
+                "name": "tickets_to_service_catalog",
+                "source_key": "tickets",
+                "source_field": "service_id",
+                "target_key": "service_catalog",
+                "target_field": "service_id",
+                "expand_name": "service",
+                "inverse_expand_name": "tickets",
+                "required": True,
+                "description": (
+                    "Every ticket is raised against a service catalog entry "
+                    "that owns the service."
+                ),
+            },
+        ],
     )
 
 
@@ -977,6 +1081,53 @@ def _seed_crm_server(conn: sqlite3.Connection) -> None:
             "or next step."
         ),
         int(opportunities_dataset["id"]),
+    )
+    _seed_relationships(
+        conn,
+        server_id,
+        [
+            {
+                "name": "contacts_to_accounts",
+                "source_key": "contacts",
+                "source_field": "account_id",
+                "target_key": "accounts",
+                "target_field": "account_id",
+                "expand_name": "account",
+                "inverse_expand_name": "contacts",
+                "required": True,
+                "description": (
+                    "Each contact belongs to an account; expand to get "
+                    "full account details."
+                ),
+            },
+            {
+                "name": "opportunities_to_accounts",
+                "source_key": "opportunities",
+                "source_field": "account_id",
+                "target_key": "accounts",
+                "target_field": "account_id",
+                "expand_name": "account",
+                "inverse_expand_name": "opportunities",
+                "required": True,
+                "description": (
+                    "Each opportunity is associated with a selling account."
+                ),
+            },
+            {
+                "name": "opportunities_to_contacts",
+                "source_key": "opportunities",
+                "source_field": "primary_contact_id",
+                "target_key": "contacts",
+                "target_field": "contact_id",
+                "expand_name": "primary_contact",
+                "inverse_expand_name": "opportunities",
+                "required": True,
+                "description": (
+                    "The main buyer contact for an opportunity; must belong "
+                    "to the same account."
+                ),
+            },
+        ],
     )
 
 
@@ -1117,6 +1268,52 @@ def _seed_finance_server(conn: sqlite3.Connection) -> None:
         int(approvals_dataset["id"]),
         ["approval_id", "report_id", "approver", "status", "decision_date"],
     )
+    _seed_relationships(
+        conn,
+        server_id,
+        [
+            {
+                "name": "expense_lines_to_reports",
+                "source_key": "expense_lines",
+                "source_field": "report_id",
+                "target_key": "expense_reports",
+                "target_field": "report_id",
+                "expand_name": "report",
+                "inverse_expand_name": "lines",
+                "required": True,
+                "description": (
+                    "Each expense line item belongs to an expense report header."
+                ),
+            },
+            {
+                "name": "expense_reports_to_cost_centres",
+                "source_key": "expense_reports",
+                "source_field": "cost_center_id",
+                "target_key": "cost_centres",
+                "target_field": "cost_center_id",
+                "expand_name": "cost_centre",
+                "inverse_expand_name": "reports",
+                "required": True,
+                "description": (
+                    "Expense report is charged to a cost centre; expand to "
+                    "get owner and budget."
+                ),
+            },
+            {
+                "name": "approvals_to_reports",
+                "source_key": "approvals",
+                "source_field": "report_id",
+                "target_key": "expense_reports",
+                "target_field": "report_id",
+                "expand_name": "report",
+                "inverse_expand_name": "approvals",
+                "required": True,
+                "description": (
+                    "Each approval decision is linked to the expense report it covers."
+                ),
+            },
+        ],
+    )
 
 
 def seed_if_empty(conn: sqlite3.Connection) -> bool:
@@ -1214,6 +1411,26 @@ def seed_if_empty(conn: sqlite3.Connection) -> bool:
         "Use when the agent needs to remove an order that was cancelled or created in error.",
         int(orders_dataset["id"]),
     )
+    _seed_relationships(
+        conn,
+        server_id,
+        [
+            {
+                "name": "order_lines_to_orders",
+                "source_key": "order_lines",
+                "source_field": "order_id",
+                "target_key": "orders",
+                "target_field": "id",
+                "expand_name": "order",
+                "inverse_expand_name": "lines",
+                "required": True,
+                "description": (
+                    "Each order line belongs to one order; expand to get "
+                    "the parent order header."
+                ),
+            },
+        ],
+    )
 
     _seed_hr_server(conn)
     _seed_it_server(conn)
@@ -1261,7 +1478,7 @@ def seed_if_empty(conn: sqlite3.Connection) -> bool:
     )
 
     logger.info(
-        "finished demo seeding: 5 servers, 15 datasets, 42 endpoints, "
+        "finished demo seeding: 5 servers, 15 datasets, 42 endpoints, 12 relationships, "
         f"{len(_ORDERS)} orders, {len(_ORDER_LINES)} order lines, "
         f"{len(_HR_EMPLOYEES)} employees, {len(_IT_TICKETS)} IT tickets, "
         f"{len(_CRM_ACCOUNTS)} CRM accounts, {len(_FINANCE_EXPENSE_REPORTS)} expense reports, "

@@ -240,3 +240,85 @@ def test_all_seeded_row_values_are_json_scalars(conn: sqlite3.Connection) -> Non
                     if field == "_row_id":
                         continue
                     assert isinstance(value, JSON_SCALAR_TYPES)
+
+
+_EXPECTED_EXPAND_NAMES: dict[str, tuple[str, str]] = {
+    "order_lines_to_orders": ("order", "lines"),
+    "employees_manager": ("manager", "direct_reports"),
+    "employees_org_unit": ("org_unit", "employees"),
+    "time_off_requests_to_employees": ("employee", "time_off_requests"),
+    "tickets_to_assets": ("asset", "tickets"),
+    "tickets_to_service_catalog": ("service", "tickets"),
+    "contacts_to_accounts": ("account", "contacts"),
+    "opportunities_to_accounts": ("account", "opportunities"),
+    "opportunities_to_contacts": ("primary_contact", "opportunities"),
+    "approvals_to_reports": ("report", "approvals"),
+    "expense_lines_to_reports": ("report", "lines"),
+    "expense_reports_to_cost_centres": ("cost_centre", "reports"),
+}
+
+
+def test_seed_creates_exactly_12_relationships(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+    servers = service.list_servers(conn)
+    total = sum(
+        len(service.list_relationships(conn, int(server["id"]))) for server in servers
+    )
+    assert total == 12
+
+
+def test_seed_relationships_have_correct_expand_names(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+    servers = service.list_servers(conn)
+    all_rels = []
+    for server in servers:
+        all_rels.extend(service.list_relationships(conn, int(server["id"])))
+
+    by_name = {rel["name"]: rel for rel in all_rels}
+    for rel_name, (expand_name, inverse_expand_name) in _EXPECTED_EXPAND_NAMES.items():
+        assert rel_name in by_name, f"missing relationship {rel_name!r}"
+        rel = by_name[rel_name]
+        assert rel["expand_name"] == expand_name, f"{rel_name}: wrong expand_name"
+        assert rel["inverse_expand_name"] == inverse_expand_name, (
+            f"{rel_name}: wrong inverse_expand_name"
+        )
+
+
+def test_seed_expand_rows_forward_and_inverse(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+
+    orders_server = _server(conn, "contoso-orders")
+    datasets = _datasets_by_key(conn, int(orders_server["id"]))
+    lines_id = int(datasets["order_lines"]["id"])
+
+    lines_rows = service.list_rows(conn, lines_id)
+    expanded = service.expand_rows(conn, lines_id, lines_rows[:5], ["order"])
+    assert any(isinstance(row.get("order"), dict) for row in expanded)
+
+    orders_id = int(datasets["orders"]["id"])
+    orders_rows = service.list_rows(conn, orders_id)
+    inv_expanded = service.expand_rows(conn, orders_id, orders_rows[:5], ["lines"])
+    assert any(
+        isinstance(row.get("lines"), list) and len(row["lines"]) > 0 for row in inv_expanded
+    )
+
+
+def test_ensure_demo_relationships_on_seeded_db_skips_all(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+    result = service.ensure_demo_relationships(conn)
+    assert result["relationships_created"] == 0
+    assert result["skipped_existing"] == 12
+
+
+def test_employees_manager_self_reference_expands(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+
+    hris_server = _server(conn, "northwind-hris")
+    datasets = _datasets_by_key(conn, int(hris_server["id"]))
+    employees_id = int(datasets["employees"]["id"])
+    employees_rows = service.list_rows(conn, employees_id)
+
+    expanded = service.expand_rows(conn, employees_id, employees_rows, ["manager"])
+    managers = [row.get("manager") for row in expanded]
+    assert any(isinstance(m, dict) for m in managers), "no employee expanded to a manager dict"
+    assert any(m is None for m in managers), "every employee has a manager — top-of-org row missing"
