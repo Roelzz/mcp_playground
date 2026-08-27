@@ -4,6 +4,18 @@
 
 MCP Playground is a browser-managed playground for authoring persistent mock MCP servers and OpenAI-compatible endpoints. It is purpose-built for Microsoft Copilot Studio demos, bootcamps, and solution-architecture training. Admins can model multiple mock servers, multiple endpoints, and shared demo datasets. Definitions and live demo data persist, so trainees can keep working across restarts.
 
+## Exposed surfaces
+
+| Surface | Path | Auth |
+|---|---|---|
+| Admin UI | `/ui/` | session cookie |
+| Admin CRUD API | `/api/*` | session cookie or API key; writes require `admin` scope |
+| Mock MCP server | `/mcp/{slug}` | per-server (open or API key) |
+| Management MCP server | `/mcp/_admin` | API key, `admin` scope |
+| Plain REST mock | `/mock/{slug}/*` | per-server (open or API key) |
+| OpenAI-compatible chat | `POST /v1/{slug}/chat/completions` | per-endpoint (open or API key) |
+| Health | `/health` | open |
+
 ## Quick start (local, no container)
 
 ```bash
@@ -52,6 +64,21 @@ Copy `.env.example` to `.env` and edit values for your environment.
 | `BOOTSTRAP_PASSWORD` | Optional initial admin password. Leave blank to auto-generate credentials on first boot. | blank |
 | `INSECURE_COOKIES` | Set to `1` when serving over plain HTTP on a LAN so session cookies still work. | `0` |
 
+## Admin UI
+
+The admin UI at `/ui/` has eight pages.
+
+| Page | What it does |
+|---|---|
+| Servers | Create and edit mock MCP servers; copy the live MCP URL for each. |
+| Datasets | Paste or edit JSON or CSV; inspect the inferred field schema; manage seed snapshots. |
+| Endpoints | Define MCP tools by describing REST-like endpoint shapes; tool type is inferred live. |
+| LLM endpoints | Create OpenAI-compatible mock or proxy chat endpoints; set first-match-wins response rules. |
+| Test console | Call an endpoint over **REST** (`/mock/{slug}/…`) to exercise writes and see the real HTTP status plus a copyable `curl` line, or through the **Executor** path (`/api/servers/{slug}/tools/{tool_name}/call`) which is admin-gated and read-only. |
+| Traffic | Browse every recorded request and response; optionally auto-refresh every three seconds. |
+| Connect it | Copy the exact values for the Copilot Studio MCP server dialog; also shows custom connector steps with a Swagger export link. |
+| API keys | Create API keys with `readonly` or `admin` scope; the plaintext key is shown once on creation. |
+
 ## Calling a server over plain REST
 
 Every server is exposed twice from the same endpoint definitions.
@@ -88,6 +115,25 @@ The Swagger export at `/api/servers/{id}/swagger` describes this REST surface, s
 2. Open Power Apps or Power Automate, go to **Custom connectors**.
 3. Choose **New custom connector > Import an OpenAPI file**.
 4. Add the connector to your agent in Copilot Studio.
+
+See **[COPILOT-STUDIO.md](COPILOT-STUDIO.md)** for the full runbook covering both connection paths — MCP server onboarding and Swagger-based custom connector.
+
+## Management MCP server
+
+`/mcp/_admin` is a second FastMCP server that exposes **30 tools** mirroring the admin REST API. It lets an LLM agent drive the entire playground — create servers, load datasets, define endpoints, adjust LLM responses, and inspect traffic — without a human touching the web UI.
+
+Authentication: API key with `admin` scope, passed as `X-API-Key: <key>` or `Authorization: Bearer <key>`.
+
+Tools are grouped into six areas:
+
+| Area | Tools |
+|---|---|
+| Servers | `list_servers`, `get_server`, `create_server`, `update_server`, `delete_server`, `get_connection_info` |
+| Datasets | `list_datasets`, `get_dataset`, `create_dataset`, `update_dataset`, `delete_dataset` |
+| Dataset rows | `list_rows`, `replace_rows`, `add_rows`, `reset_to_seed`, `save_as_seed` |
+| Endpoints | `list_endpoints`, `get_endpoint`, `create_endpoint`, `update_endpoint`, `delete_endpoint` |
+| LLM endpoints | `list_llm_endpoints`, `get_llm_endpoint`, `create_llm_endpoint`, `update_llm_endpoint`, `delete_llm_endpoint`, `set_llm_responses` |
+| Misc | `call_tool`, `get_traffic`, `clear_traffic` |
 
 ## Data & persistence
 
@@ -144,10 +190,4 @@ upstream instead of a public mirror.
 
 ## Roadmap
 
-- Admin web UI.
-- API-key auth.
-- Management MCP server at `/mcp/_admin`.
-- OpenAI-compatible mock and proxy LLM endpoints.
-- Export and import bundles.
-- Traffic log.
 - Azure deployment.
