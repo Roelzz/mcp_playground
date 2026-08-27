@@ -9,7 +9,8 @@ from auth import get_conn
 
 
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_DISABLED", "1")
     conn = db.init_db(str(tmp_path / "test.db"))
     app = FastAPI()
     app.include_router(api.router)
