@@ -6,10 +6,10 @@ import sqlite3
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from typing import Any
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -22,7 +22,6 @@ router = APIRouter(prefix="/v1", tags=["llm"])
 
 STATUS = {"not_found": 404, "conflict": 409, "invalid": 400}
 Conn = auth.ConnDep
-AuthorizationHeader = Annotated[str | None, Header()]
 
 
 class ChatCompletionRequest(BaseModel):
@@ -40,6 +39,22 @@ def _handle(fn, *args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)
     except service.ServiceError as exc:
         raise HTTPException(status_code=STATUS.get(exc.code, 400), detail=exc.message) from exc
+
+
+def _require_endpoint_auth(
+    request: Request, conn: sqlite3.Connection, llm: dict[str, Any]
+) -> None:
+    """Enforce the endpoint's own auth_mode, mirroring the /mcp/{slug} gate in main.py."""
+    if llm.get("auth_mode") != "api_key":
+        return
+    key = auth._request_api_key(request)
+    principal = auth._resolve_api_key(conn, key) if key else None
+    if principal is None:
+        raise HTTPException(
+            status_code=401,
+            detail=f"api key required for llm endpoint: {llm['slug']}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def _now() -> int:
@@ -271,11 +286,11 @@ async def _proxy_stream(llm: dict[str, Any], body: ChatCompletionRequest) -> Str
 @router.get("/{slug}/models")
 def list_models(
     slug: str,
+    request: Request,
     conn: sqlite3.Connection = Conn,
-    authorization: AuthorizationHeader = None,
 ) -> dict[str, Any]:
-    _ = authorization
     llm = _handle(service.get_llm_endpoint_by_slug, conn, slug)
+    _require_endpoint_auth(request, conn, llm)
     return {
         "object": "list",
         "data": [
@@ -313,16 +328,20 @@ def _log_llm(
 async def chat_completions(
     slug: str,
     body: ChatCompletionRequest,
+    request: Request,
     conn: sqlite3.Connection = Conn,
-    authorization: AuthorizationHeader = None,
 ) -> dict[str, Any] | Response:
-    _ = authorization
     started = time.perf_counter()
     logged = {"model": body.model, "stream": body.stream, "messages": body.messages}
     try:
         llm = _handle(service.get_llm_endpoint_by_slug, conn, slug)
     except HTTPException as exc:
         _log_llm(conn, slug, started, "not_found", logged, {"error": exc.detail})
+        raise
+    try:
+        _require_endpoint_auth(request, conn, llm)
+    except HTTPException as exc:
+        _log_llm(conn, slug, started, "unauthorized", logged, {"error": exc.detail})
         raise
     matched = False
 

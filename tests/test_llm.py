@@ -6,9 +6,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import auth
 import db
 import llm
 import service
+import store
 from auth import get_conn
 
 
@@ -308,3 +310,66 @@ def test_proxy_mode_non_2xx_returns_upstream_status_and_body(
 
     assert response.status_code == 401
     assert response.json()["detail"] == {"error": {"message": "bad key"}}
+
+
+def _mint_key(client: TestClient, label: str = "trainee", scope: str = "admin") -> str:
+    key = auth.generate_api_key()
+    store.create_api_key(_conn(client), label=label, key_hash=auth.hash_api_key(key), scope=scope)
+    return key
+
+
+def test_auth_mode_none_leaves_endpoint_open(client: TestClient) -> None:
+    _create_llm(client, auth_mode="none")
+
+    assert client.get("/v1/mock/models").status_code == 200
+    assert _post_chat(client, "mock").status_code == 200
+
+
+def test_auth_mode_api_key_rejects_anonymous_callers(client: TestClient) -> None:
+    _create_llm(client, auth_mode="api_key")
+
+    models = client.get("/v1/mock/models")
+    assert models.status_code == 401
+    assert models.headers["WWW-Authenticate"] == "Bearer"
+    assert "mock" in models.json()["detail"]
+
+    chat = _post_chat(client, "mock")
+    assert chat.status_code == 401
+
+    logged = store.get_traffic(_conn(client))
+    assert any(row["status"] == "unauthorized" for row in logged)
+
+
+def test_auth_mode_api_key_rejects_unknown_key(client: TestClient) -> None:
+    _create_llm(client, auth_mode="api_key")
+
+    response = client.get("/v1/mock/models", headers={"Authorization": "Bearer mcpp_nope"})
+
+    assert response.status_code == 401
+
+
+def test_auth_mode_api_key_accepts_bearer_and_x_api_key(client: TestClient) -> None:
+    _create_llm(client, auth_mode="api_key")
+    key = _mint_key(client)
+
+    bearer = client.get("/v1/mock/models", headers={"Authorization": f"Bearer {key}"})
+    assert bearer.status_code == 200, bearer.text
+
+    header = client.get("/v1/mock/models", headers={"X-API-Key": key})
+    assert header.status_code == 200, header.text
+
+    chat = client.post(
+        "/v1/mock/chat/completions",
+        json={"messages": [{"role": "user", "content": "hello"}]},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert chat.status_code == 200, chat.text
+
+
+def test_readonly_key_may_still_call_a_protected_llm_endpoint(client: TestClient) -> None:
+    _create_llm(client, auth_mode="api_key")
+    key = _mint_key(client, label="ro", scope="readonly")
+
+    response = client.get("/v1/mock/models", headers={"Authorization": f"Bearer {key}"})
+
+    assert response.status_code == 200, response.text
