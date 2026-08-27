@@ -62,34 +62,20 @@ def build_swagger(conn: sqlite3.Connection, server_id: int, base_url: str) -> di
         operation_ids.add(tool_name)
 
         dataset = datasets[int(endpoint["dataset_id"])]
-        param_definition = _parameter_definition_name(tool_name)
-        response_definition = _response_definition_name(tool_name)
-        definitions[param_definition] = _schema_for_tool_params(endpoint, dataset)
-        definitions[response_definition] = _schema_for_tool_response(endpoint, dataset)
+        body_definition = _body_definition_name(endpoint)
+        if body_definition is not None:
+            definitions[body_definition] = _schema_for_tool_params(endpoint, dataset)
 
-        paths[f"/{tool_name}/call"] = {
-            "post": {
-                "operationId": tool_name,
-                "summary": endpoint.get("description") or tool_name.replace("_", " ").title(),
-                "x-ms-summary": endpoint.get("description") or tool_name.replace("_", " ").title(),
-                "description": _operation_description(endpoint, dataset),
-                "parameters": [
-                    {
-                        "name": "body",
-                        "in": "body",
-                        "required": True,
-                        "x-ms-summary": "Tool parameters",
-                        "description": "Parameters passed to the MCP Playground tool call.",
-                        "schema": {"$ref": f"#/definitions/{param_definition}"},
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "Success",
-                        "schema": {"$ref": f"#/definitions/{response_definition}"},
-                    }
-                },
-            }
+        summary = endpoint.get("description") or tool_name.replace("_", " ").title()
+        path = str(endpoint["path"])
+        method = str(endpoint["method"]).lower()
+        paths.setdefault(path, {})[method] = {
+            "operationId": tool_name,
+            "summary": summary,
+            "x-ms-summary": summary,
+            "description": _operation_description(endpoint, dataset),
+            "parameters": _parameters_for_endpoint(endpoint, dataset, body_definition),
+            "responses": _responses_for_endpoint(endpoint, dataset),
         }
 
     swagger: dict[str, Any] = {
@@ -100,19 +86,18 @@ def build_swagger(conn: sqlite3.Connection, server_id: int, base_url: str) -> di
             "version": "1.0.0",
         },
         "host": host,
-        "basePath": f"/api/servers/{server['slug']}/tools",
+        "basePath": f"/mock/{server['slug']}",
         "schemes": [scheme],
         "consumes": ["application/json"],
         "produces": ["application/json"],
         "paths": paths,
         "definitions": definitions,
     }
-    # The callable route lives under /api and always requires an admin API key,
-    # regardless of the MCP server's own auth_mode.
-    swagger["securityDefinitions"] = {
-        "api_key": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
-    }
-    swagger["security"] = [{"api_key": []}]
+    if server["auth_mode"] == "api_key":
+        swagger["securityDefinitions"] = {
+            "api_key": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+        }
+        swagger["security"] = [{"api_key": []}]
 
     logger.info(f"exported swagger for server {server['slug']!r} (id={server_id})")
     return swagger
@@ -273,36 +258,21 @@ def _schema_for_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
 def _schema_for_tool_params(endpoint: dict[str, Any], dataset: dict[str, Any]) -> dict[str, Any]:
     tool_type = str(endpoint["tool_type"])
     field_schema = dict(dataset.get("field_schema") or {})
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-
+    path_params = set(_path_param_names(str(endpoint["path"])))
     path_param = _path_param_name(str(endpoint["path"]))
-    if path_param is not None and tool_type in {"get", "update", "delete"}:
-        properties[path_param] = _property_schema(
-            _path_param_type(path_param, dataset),
-            f"Required {path_param} value from {endpoint['path']}",
-        )
-        required.append(path_param)
+    if path_param is not None:
+        path_params.add(path_param)
+    properties: dict[str, Any] = {}
 
-    if tool_type in {"list", "search"}:
-        properties["limit"] = _property_schema("integer", "Maximum number of rows to return")
-        if tool_type == "search":
-            properties["q"] = _property_schema("string", "Text to search for across string fields")
+    if tool_type in {"create", "update"}:
         for field, type_name in field_schema.items():
-            properties[field] = _property_schema(
-                _swagger_type(type_name), f"Filter by {_field_label(field)}"
-            )
-    elif tool_type in {"create", "update"}:
-        for field, type_name in field_schema.items():
-            if field == path_param:
+            if tool_type == "update" and field in path_params:
                 continue
             properties[field] = _property_schema(_swagger_type(type_name), _field_label(field))
 
     schema: dict[str, Any] = {"type": "object", "additionalProperties": False}
     if properties:
         schema["properties"] = properties
-    if required:
-        schema["required"] = required
     return schema
 
 
@@ -325,11 +295,94 @@ def _schema_for_tool_response(endpoint: dict[str, Any], dataset: dict[str, Any])
         }
     else:
         result_schema = row_ref
+    return result_schema
+
+
+def _parameters_for_endpoint(
+    endpoint: dict[str, Any], dataset: dict[str, Any], body_definition: str | None
+) -> list[dict[str, Any]]:
+    tool_type = str(endpoint["tool_type"])
+    parameters = _path_parameters(str(endpoint["path"]), dataset)
+    if tool_type in {"list", "search"}:
+        parameters.extend(_query_parameters(tool_type, dataset))
+    if body_definition is not None:
+        parameters.append(_body_parameter(endpoint, body_definition))
+    return parameters
+
+
+def _path_parameters(path: str, dataset: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": name,
+            "in": "path",
+            "required": True,
+            "description": f"Required {name} value from {path}",
+            **_property_schema(_path_param_type(name, dataset), _field_label(name)),
+        }
+        for name in _path_param_names(path)
+    ]
+
+
+def _query_parameters(tool_type: str, dataset: dict[str, Any]) -> list[dict[str, Any]]:
+    parameters = [
+        {
+            "name": "limit",
+            "in": "query",
+            "required": False,
+            "description": "Maximum number of rows to return",
+            **_property_schema("integer", _field_label("limit")),
+        }
+    ]
+    if tool_type == "search":
+        parameters.append(
+            {
+                "name": "q",
+                "in": "query",
+                "required": False,
+                "description": "Text to search for across string fields",
+                **_property_schema("string", "Search Query"),
+            }
+        )
+    for field, type_name in dict(dataset.get("field_schema") or {}).items():
+        parameters.append(
+            {
+                "name": field,
+                "in": "query",
+                "required": False,
+                "description": f"Filter by {_field_label(field)}",
+                **_property_schema(_swagger_type(type_name), _field_label(field)),
+            }
+        )
+    return parameters
+
+
+def _body_parameter(endpoint: dict[str, Any], body_definition: str) -> dict[str, Any]:
+    tool_type = str(endpoint["tool_type"])
     return {
-        "type": "object",
-        "properties": {"result": result_schema},
-        "additionalProperties": False,
+        "name": "body",
+        "in": "body",
+        "required": True,
+        "x-ms-summary": _field_label("body"),
+        "description": f"Fields for the {tool_type} request body.",
+        "schema": {"$ref": f"#/definitions/{body_definition}"},
     }
+
+
+def _responses_for_endpoint(endpoint: dict[str, Any], dataset: dict[str, Any]) -> dict[str, Any]:
+    tool_type = str(endpoint["tool_type"])
+    status_code = "201" if tool_type == "create" else "200"
+    return {
+        status_code: {
+            "description": "Created" if status_code == "201" else "Success",
+            "schema": _schema_for_tool_response(endpoint, dataset),
+        }
+    }
+
+
+def _body_definition_name(endpoint: dict[str, Any]) -> str | None:
+    if str(endpoint["tool_type"]) not in {"create", "update"}:
+        return None
+    return _parameter_definition_name(str(endpoint["tool_name"]))
 
 
 def _property_schema(type_name: str, summary: str) -> dict[str, Any]:
@@ -337,9 +390,12 @@ def _property_schema(type_name: str, summary: str) -> dict[str, Any]:
 
 
 def _path_param_type(param_name: str, dataset: dict[str, Any]) -> str:
+    field_schema = dict(dataset.get("field_schema") or {})
+    if param_name in field_schema:
+        return _swagger_type(str(field_schema[param_name]))
     id_field = str(dataset.get("id_field") or "id")
-    if param_name:
-        return _swagger_type(str(dict(dataset.get("field_schema") or {}).get(id_field, "string")))
+    if param_name == id_field:
+        return _swagger_type(str(field_schema.get(id_field, "string")))
     return "string"
 
 
@@ -391,10 +447,12 @@ def _field_label(field: str) -> str:
 
 
 def _path_param_name(path: str) -> str | None:
-    last_segment = path.rstrip("/").rsplit("/", 1)[-1]
-    if last_segment.startswith("{") and last_segment.endswith("}") and len(last_segment) > 2:
-        return last_segment[1:-1]
-    return None
+    names = _path_param_names(path)
+    return names[-1] if names else None
+
+
+def _path_param_names(path: str) -> list[str]:
+    return re.findall(r"\{([^}/]+)\}", path)
 
 
 def _bundle_dataset(conn: sqlite3.Connection, dataset: dict[str, Any]) -> dict[str, Any]:

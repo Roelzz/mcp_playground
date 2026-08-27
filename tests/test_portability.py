@@ -1,5 +1,8 @@
 import json
 import re
+import sqlite3
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,7 +17,7 @@ from auth import get_conn
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("AUTH_DISABLED", "1")
     conn = db.init_db(str(tmp_path / "test.db"))
     app = FastAPI()
@@ -25,11 +28,13 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
-def _conn(client: TestClient):
+def _conn(client: TestClient) -> sqlite3.Connection:
     return client.app.dependency_overrides[get_conn]()
 
 
-def _build_server(conn, slug: str = "acme", auth_mode: str = "none") -> dict[str, Any]:
+def _build_server(
+    conn: sqlite3.Connection, slug: str = "acme", auth_mode: str = "none"
+) -> dict[str, Any]:
     server = service.create_server(conn, slug, slug.title(), "Demo server", auth_mode)
     orders = service.create_dataset(
         conn,
@@ -56,6 +61,9 @@ def _build_server(conn, slug: str = "acme", auth_mode: str = "none") -> dict[str
     empty = service.create_dataset(conn, server["id"], "empty", "id", [])
     service.create_endpoint(
         conn, server["id"], "/orders", "GET", "list_orders", "List orders", orders["id"]
+    )
+    service.create_endpoint(
+        conn, server["id"], "/orders", "POST", "create_order", "Create order", orders["id"]
     )
     service.create_endpoint(
         conn, server["id"], "/orders/search", "GET", "search_orders", "Search orders", orders["id"]
@@ -93,13 +101,25 @@ def _build_server(conn, slug: str = "acme", auth_mode: str = "none") -> dict[str
     return server
 
 
-def _param_schema(swagger: dict[str, Any], operation_id: str) -> dict[str, Any]:
+def _operation(swagger: dict[str, Any], operation_id: str) -> dict[str, Any]:
     for path_item in swagger["paths"].values():
-        operation = path_item["post"]
-        if operation["operationId"] == operation_id:
-            ref = operation["parameters"][0]["schema"]["$ref"].rsplit("/", 1)[-1]
-            return swagger["definitions"][ref]
+        for operation in path_item.values():
+            if operation["operationId"] == operation_id:
+                return operation
     raise AssertionError(f"operation {operation_id} not found")
+
+
+def _parameter(operation: dict[str, Any], name: str) -> dict[str, Any]:
+    for parameter in operation["parameters"]:
+        if parameter["name"] == name:
+            return parameter
+    raise AssertionError(f"parameter {name} not found")
+
+
+def _body_schema(swagger: dict[str, Any], operation_id: str) -> dict[str, Any]:
+    operation = _operation(swagger, operation_id)
+    ref = _parameter(operation, "body")["schema"]["$ref"].rsplit("/", 1)[-1]
+    return swagger["definitions"][ref]
 
 
 def _assert_no_key(value: Any, forbidden: set[str]) -> None:
@@ -121,17 +141,30 @@ def test_swagger_shape_operations_parameters_and_definitions(client: TestClient)
     assert swagger["swagger"] == "2.0"
     assert swagger["info"] == {"title": "Acme", "description": "Demo server", "version": "1.0.0"}
     assert swagger["host"] == "localhost:2009"
-    assert swagger["basePath"] == "/api/servers/acme/tools"
+    assert swagger["basePath"] == "/mock/acme"
     assert swagger["schemes"] == ["http"]
+    assert set(swagger["paths"]) == {
+        "/empty",
+        "/orders",
+        "/orders/search",
+        "/orders/{order_number}",
+    }
+    assert all(not path.endswith("/call") for path in swagger["paths"])
+    assert set(swagger["paths"]["/orders"]) == {"get", "post"}
 
-    operations = [path_item["post"] for path_item in swagger["paths"].values()]
+    operations = [
+        operation
+        for path_item in swagger["paths"].values()
+        for operation in path_item.values()
+    ]
     operation_ids = [operation["operationId"] for operation in operations]
-    assert len(operation_ids) == 6
+    assert len(operation_ids) == 7
     assert len(operation_ids) == len(set(operation_ids))
     assert all(
         re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", operation_id) for operation_id in operation_ids
     )
     assert set(operation_ids) == {
+        "create_order",
         "list_orders",
         "search_orders",
         "get_order",
@@ -144,15 +177,40 @@ def test_swagger_shape_operations_parameters_and_definitions(client: TestClient)
         for parameter in operation["parameters"]:
             assert parameter["x-ms-summary"]
 
-    assert "limit" in _param_schema(swagger, "list_orders")["properties"]
-    search_properties = _param_schema(swagger, "search_orders")["properties"]
-    assert "q" in search_properties
-    assert "status" in search_properties
+    list_operation = _operation(swagger, "list_orders")
+    limit_param = _parameter(list_operation, "limit")
+    assert limit_param["in"] == "query"
+    assert limit_param["required"] is False
+    assert limit_param["type"] == "integer"
+    assert _parameter(list_operation, "status")["in"] == "query"
 
-    for operation_id in ("get_order", "update_order", "delete_order"):
-        schema = _param_schema(swagger, operation_id)
-        assert "order_number" in schema["properties"]
-        assert "order_number" in schema["required"]
+    search_operation = _operation(swagger, "search_orders")
+    q_param = _parameter(search_operation, "q")
+    assert q_param["in"] == "query"
+    assert q_param["description"] == "Text to search for across string fields"
+
+    get_operation = _operation(swagger, "get_order")
+    path_param = _parameter(get_operation, "order_number")
+    assert path_param["in"] == "path"
+    assert path_param["required"] is True
+    assert path_param["type"] == "integer"
+    assert "schema" not in path_param
+
+    create_operation = _operation(swagger, "create_order")
+    create_body = _parameter(create_operation, "body")
+    assert create_body["in"] == "body"
+    assert create_body["required"] is True
+    assert create_operation["responses"]["201"]["schema"] == {"$ref": "#/definitions/OrdersItem"}
+
+    update_schema = _body_schema(swagger, "update_order")
+    assert "order_number" not in update_schema["properties"]
+    assert update_schema["additionalProperties"] is False
+
+    delete_operation = _operation(swagger, "delete_order")
+    assert all(parameter["in"] != "body" for parameter in delete_operation["parameters"])
+    delete_schema = delete_operation["responses"]["200"]["schema"]
+    assert delete_schema["properties"]["deleted"]["type"] == "boolean"
+    assert delete_schema["properties"]["order_number"]["type"] == "integer"
 
     order_def = swagger["definitions"]["OrdersItem"]
     assert order_def["properties"]["order_number"]["type"] == "integer"
@@ -164,20 +222,46 @@ def test_swagger_shape_operations_parameters_and_definitions(client: TestClient)
     assert json.loads(json.dumps(swagger)) == swagger
 
 
-def test_swagger_always_requires_api_key(client: TestClient) -> None:
+def test_swagger_security_matches_server_auth_mode(client: TestClient) -> None:
     conn = _conn(client)
     none_server = _build_server(conn, "none-server", "none")
     key_server = _build_server(conn, "key-server", "api_key")
 
     none_swagger = portability.build_swagger(conn, none_server["id"], "https://example.com")
     key_swagger = portability.build_swagger(conn, key_server["id"], "https://example.com")
-
     expected = {"api_key": {"type": "apiKey", "in": "header", "name": "X-API-Key"}}
-    # The /api call route is admin-gated no matter what the MCP server's auth_mode is.
-    assert none_swagger["securityDefinitions"] == expected
-    assert none_swagger["security"] == [{"api_key": []}]
+    assert "securityDefinitions" not in none_swagger
+    assert "security" not in none_swagger
     assert key_swagger["securityDefinitions"] == expected
     assert key_swagger["security"] == [{"api_key": []}]
+
+
+def test_swagger_duplicate_operation_id_still_raises(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = _conn(client)
+    server = _build_server(conn)
+    original = service.list_endpoints
+
+    def duplicate_endpoints(
+        endpoint_conn: sqlite3.Connection, endpoint_server_id: int
+    ) -> list[dict[str, Any]]:
+        endpoints = original(endpoint_conn, endpoint_server_id)
+        endpoints.append(dict(endpoints[0]))
+        return endpoints
+
+    monkeypatch.setattr(portability.service, "list_endpoints", duplicate_endpoints)
+
+    with pytest.raises(service.ServiceError, match="duplicate operationId 'create_order'"):
+        portability.build_swagger(conn, server["id"], "https://example.com")
+
+
+def test_swagger_missing_host_still_raises(client: TestClient) -> None:
+    conn = _conn(client)
+    server = _build_server(conn)
+
+    with pytest.raises(service.ServiceError, match="PUBLIC_BASE_URL must include a host"):
+        portability.build_swagger(conn, server["id"], "")
 
 
 def test_export_routes_download_and_missing_server(client: TestClient) -> None:
@@ -225,9 +309,9 @@ def test_bundle_round_trip_preserves_counts_rows_seed_rows_and_endpoints(
     imported = summary["server"]
 
     assert summary["datasets"] == 2
-    assert summary["endpoints"] == 6
+    assert summary["endpoints"] == 7
     assert len(service.list_datasets(conn, imported["id"])) == 2
-    assert len(service.list_endpoints(conn, imported["id"])) == 6
+    assert len(service.list_endpoints(conn, imported["id"])) == 7
 
     imported_datasets = service.list_datasets(conn, imported["id"])
     imported_orders = next(dataset for dataset in imported_datasets if dataset["key"] == "orders")
@@ -237,6 +321,7 @@ def test_bundle_round_trip_preserves_counts_rows_seed_rows_and_endpoints(
 
     endpoints = service.list_endpoints(conn, imported["id"])
     assert sorted(endpoint["tool_name"] for endpoint in endpoints) == [
+        "create_order",
         "delete_order",
         "get_order",
         "list_empty",
@@ -245,6 +330,7 @@ def test_bundle_round_trip_preserves_counts_rows_seed_rows_and_endpoints(
         "update_order",
     ]
     assert {endpoint["tool_name"]: endpoint["tool_type"] for endpoint in endpoints} == {
+        "create_order": "create",
         "list_orders": "list",
         "search_orders": "search",
         "get_order": "get",
