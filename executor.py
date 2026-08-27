@@ -1,6 +1,7 @@
 import sqlite3
 from typing import Any
 
+import service
 import store
 
 
@@ -68,13 +69,30 @@ def execute(
     _validate_endpoint_dataset(endpoint, dataset)
     tool_type = infer_tool_type(str(endpoint["method"]), str(endpoint["path"]))
 
+    # Strip expand BEFORE any filtering so it never leaks into equality-filter logic.
+    expand_value = params.pop("expand", None)
+
+    if tool_type in {"create", "update", "delete"}:
+        if expand_value is not None:
+            raise service.ServiceError(
+                f"expand is not supported on {tool_type} operations",
+                code="invalid_params",
+            )
+
+    expand_names = service.parse_expand(expand_value)
+
     if tool_type == "list":
-        return _execute_list(conn, endpoint, dataset, params, search=False)
+        return _execute_list(
+            conn, endpoint, dataset, params, search=False, expand_names=expand_names
+        )
     if tool_type == "search":
-        return _execute_list(conn, endpoint, dataset, params, search=True)
+        return _execute_list(
+            conn, endpoint, dataset, params, search=True, expand_names=expand_names
+        )
     if tool_type == "get":
         row = _find_row(conn, endpoint, dataset, params)
-        return _strip_row_id(row)
+        rows = service.expand_rows(conn, int(dataset["id"]), [_strip_row_id(row)], expand_names)
+        return rows[0]
     if tool_type == "create":
         return _execute_create(conn, dataset, params)
     if tool_type == "update":
@@ -120,6 +138,7 @@ def _execute_list(
     params: dict[str, Any],
     *,
     search: bool,
+    expand_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows = store.list_rows(conn, int(dataset["id"]))
     filtered = [_strip_row_id(row) for row in rows if _matches_filters(row, params, search=search)]
@@ -130,9 +149,17 @@ def _execute_list(
         filtered = [row for row in filtered if _matches_query(row, q)]
 
     limited = filtered[: _parse_limit(params)]
+
+    if expand_names:
+        limited = service.expand_rows(conn, int(dataset["id"]), limited, expand_names)
+
     summary_fields = _summary_fields(endpoint)
     if summary_fields:
-        return [_project(row, summary_fields) for row in limited]
+        expanded_keys = set(expand_names or [])
+        return [
+            {**_project(row, summary_fields), **{k: row[k] for k in expanded_keys if k in row}}
+            for row in limited
+        ]
     return limited
 
 

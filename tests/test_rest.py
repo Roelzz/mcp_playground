@@ -268,3 +268,90 @@ def test_traffic_row_is_written_with_rest_kind(
     assert traffic[0]["kind"] == "rest"
     assert traffic[0]["tool_name"] == "list_orders"
     assert traffic[0]["request"] == {"status": "open"}
+
+
+# ---------------------------------------------------------------------------
+# expand tests
+# ---------------------------------------------------------------------------
+
+
+def _create_expand_playground(conn: sqlite3.Connection, slug: str = "exp-rest") -> dict[str, Any]:
+    """Two datasets (orders + order_lines) with a relationship, for expand REST tests."""
+    server_id = store.create_server(conn, slug, slug.title(), "", "none")
+
+    orders_ds_id = store.create_dataset(conn, server_id, "orders", "id")
+    store.add_rows(
+        conn,
+        orders_ds_id,
+        [
+            {"id": 10, "name": "Order Ten"},
+            {"id": 20, "name": "Order Twenty"},
+            {"id": 30, "name": "Order Thirty"},
+        ],
+    )
+
+    lines_ds_id = store.create_dataset(conn, server_id, "order_lines", "id")
+    store.add_rows(
+        conn,
+        lines_ds_id,
+        [
+            {"id": 1, "order_id": 10, "qty": 2},
+            {"id": 2, "order_id": 10, "qty": 5},
+            {"id": 3, "order_id": 20, "qty": 1},
+        ],
+    )
+
+    store.create_relationship(
+        conn,
+        server_id,
+        name="lines_to_order",
+        source_dataset_id=lines_ds_id,
+        source_field="order_id",
+        target_dataset_id=orders_ds_id,
+        target_field="id",
+        relation_type="many_to_one",
+        expand_name="order",
+        inverse_expand_name="lines",
+    )
+
+    _create_endpoint(conn, server_id, orders_ds_id, "GET", "/orders", "list_orders")
+    _create_endpoint(conn, server_id, orders_ds_id, "POST", "/orders", "create_order")
+    _create_endpoint(conn, server_id, orders_ds_id, "PUT", "/orders/{id}", "update_order")
+    _create_endpoint(conn, server_id, orders_ds_id, "DELETE", "/orders/{id}", "delete_order")
+    _create_endpoint(
+        conn, server_id, lines_ds_id, "GET", "/order_lines", "list_order_lines"
+    )
+
+    return {"slug": slug, "orders_ds_id": orders_ds_id, "lines_ds_id": lines_ds_id}
+
+
+def test_rest_expand_comma_separated(client: TestClient, conn: sqlite3.Connection) -> None:
+    pg = _create_expand_playground(conn)
+    response = client.get(f"/mock/{pg['slug']}/orders?expand=lines")
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert len(rows) == 3
+    for row in rows:
+        assert "lines" in row
+        assert isinstance(row["lines"], list)
+
+
+def test_rest_expand_repeated_key(client: TestClient, conn: sqlite3.Connection) -> None:
+    """?expand=order&expand=order should work (parse_expand deduplicates)."""
+    pg = _create_expand_playground(conn)
+    response = client.get(f"/mock/{pg['slug']}/order_lines?expand=order&expand=order")
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert len(rows) == 3
+    for row in rows:
+        assert "order" in row
+        assert isinstance(row["order"], dict)
+
+
+def test_rest_expand_on_post_rejected(client: TestClient, conn: sqlite3.Connection) -> None:
+    pg = _create_expand_playground(conn)
+    response = client.post(
+        f"/mock/{pg['slug']}/orders",
+        json={"name": "New Order", "expand": "lines"},
+    )
+    assert response.status_code == 400

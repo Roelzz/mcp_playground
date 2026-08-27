@@ -443,3 +443,230 @@ def test_update_rejects_unknown_field(playground: dict[str, Any], conn: sqlite3.
 
     assert excinfo.value.code == "invalid_params"
     assert "stattus" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# expand tests
+# ---------------------------------------------------------------------------
+
+import service  # noqa: E402
+
+
+@pytest.fixture
+def expand_pg(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Two datasets (orders + order_lines) with a many-to-one relationship."""
+    server_id = store.create_server(conn, "exp-test", "ExpandTest", "", "none")
+
+    orders_ds_id = store.create_dataset(conn, server_id, "orders", "id")
+    store.add_rows(
+        conn,
+        orders_ds_id,
+        [
+            {"id": 10, "name": "Order Ten"},
+            {"id": 20, "name": "Order Twenty"},
+        ],
+    )
+
+    lines_ds_id = store.create_dataset(conn, server_id, "order_lines", "id")
+    store.add_rows(
+        conn,
+        lines_ds_id,
+        [
+            {"id": 1, "order_id": 10, "qty": 2},
+            {"id": 2, "order_id": 10, "qty": 5},
+            {"id": 3, "order_id": 20, "qty": 1},
+        ],
+    )
+
+    store.create_relationship(
+        conn,
+        server_id,
+        name="lines_to_order",
+        source_dataset_id=lines_ds_id,
+        source_field="order_id",
+        target_dataset_id=orders_ds_id,
+        target_field="id",
+        relation_type="many_to_one",
+        expand_name="order",
+        inverse_expand_name="lines",
+    )
+
+    orders_ds = store.get_dataset(conn, orders_ds_id)
+    lines_ds = store.get_dataset(conn, lines_ds_id)
+    assert orders_ds is not None and lines_ds is not None
+
+    list_orders_ep = _create_endpoint(
+        conn, server_id, orders_ds_id, "/orders", "GET", "list_orders"
+    )
+    list_orders_summary_ep = _create_endpoint(
+        conn, server_id, orders_ds_id, "/orders", "GET", "summarize_orders", ["id", "name"]
+    )
+    get_order_ep = _create_endpoint(
+        conn, server_id, orders_ds_id, "/orders/{id}", "GET", "get_order"
+    )
+    list_lines_ep = _create_endpoint(
+        conn, server_id, lines_ds_id, "/order_lines", "GET", "list_order_lines"
+    )
+    create_order_ep = _create_endpoint(
+        conn, server_id, orders_ds_id, "/orders", "POST", "create_order"
+    )
+    update_order_ep = _create_endpoint(
+        conn, server_id, orders_ds_id, "/orders/{id}", "PUT", "update_order"
+    )
+    delete_order_ep = _create_endpoint(
+        conn, server_id, orders_ds_id, "/orders/{id}", "DELETE", "delete_order"
+    )
+
+    return {
+        "server_id": server_id,
+        "orders_ds": orders_ds,
+        "lines_ds": lines_ds,
+        "ep_list_orders": list_orders_ep,
+        "ep_list_orders_summary": list_orders_summary_ep,
+        "ep_get_order": get_order_ep,
+        "ep_list_lines": list_lines_ep,
+        "ep_create_order": create_order_ep,
+        "ep_update_order": update_order_ep,
+        "ep_delete_order": delete_order_ep,
+    }
+
+
+def test_list_expand_inverse_returns_array(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    rows = execute(
+        conn, expand_pg["ep_list_orders"], expand_pg["orders_ds"], {"expand": "lines"}
+    )
+    assert len(rows) == 2
+    assert isinstance(rows[0]["lines"], list)
+    order_ten = next(r for r in rows if r["id"] == 10)
+    assert len(order_ten["lines"]) == 2
+    order_twenty = next(r for r in rows if r["id"] == 20)
+    assert len(order_twenty["lines"]) == 1
+
+
+def test_list_expand_forward_returns_object(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    rows = execute(
+        conn, expand_pg["ep_list_lines"], expand_pg["lines_ds"], {"expand": "order"}
+    )
+    assert len(rows) == 3
+    for row in rows:
+        assert "order" in row
+        assert isinstance(row["order"], dict)
+        assert "name" in row["order"]
+
+
+def test_expand_does_not_affect_row_count(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    without = execute(conn, expand_pg["ep_list_orders"], expand_pg["orders_ds"], {})
+    with_exp = execute(
+        conn, expand_pg["ep_list_orders"], expand_pg["orders_ds"], {"expand": "lines"}
+    )
+    assert len(with_exp) == len(without)
+
+
+def test_get_expand_returns_expanded_key(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    row = execute(
+        conn,
+        expand_pg["ep_get_order"],
+        expand_pg["orders_ds"],
+        {"id": 10, "expand": "lines"},
+    )
+    assert "lines" in row
+    assert isinstance(row["lines"], list)
+    assert len(row["lines"]) == 2
+
+
+def test_summary_fields_plus_expand_keeps_expanded_key(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    rows = execute(
+        conn,
+        expand_pg["ep_list_orders_summary"],
+        expand_pg["orders_ds"],
+        {"expand": "lines"},
+    )
+    for row in rows:
+        assert "id" in row
+        assert "name" in row
+        assert "lines" in row
+
+
+def test_unknown_expand_name_errors(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    with pytest.raises(service.ServiceError):
+        execute(
+            conn,
+            expand_pg["ep_list_orders"],
+            expand_pg["orders_ds"],
+            {"expand": "nope"},
+        )
+
+
+def test_dotted_expand_path_errors(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    with pytest.raises(service.ServiceError):
+        execute(
+            conn,
+            expand_pg["ep_list_orders"],
+            expand_pg["orders_ds"],
+            {"expand": "lines.items"},
+        )
+
+
+def test_more_than_5_expand_names_errors(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    with pytest.raises(service.ServiceError):
+        execute(
+            conn,
+            expand_pg["ep_list_orders"],
+            expand_pg["orders_ds"],
+            {"expand": "a,b,c,d,e,f"},
+        )
+
+
+def test_expand_on_create_rejected(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    with pytest.raises(service.ServiceError) as exc:
+        execute(
+            conn,
+            expand_pg["ep_create_order"],
+            expand_pg["orders_ds"],
+            {"name": "New", "expand": "lines"},
+        )
+    assert exc.value.code == "invalid_params"
+
+
+def test_expand_on_update_rejected(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    with pytest.raises(service.ServiceError) as exc:
+        execute(
+            conn,
+            expand_pg["ep_update_order"],
+            expand_pg["orders_ds"],
+            {"id": 10, "name": "Changed", "expand": "lines"},
+        )
+    assert exc.value.code == "invalid_params"
+
+
+def test_expand_on_delete_rejected(
+    expand_pg: dict[str, Any], conn: sqlite3.Connection
+) -> None:
+    with pytest.raises(service.ServiceError) as exc:
+        execute(
+            conn,
+            expand_pg["ep_delete_order"],
+            expand_pg["orders_ds"],
+            {"id": 10, "expand": "lines"},
+        )
+    assert exc.value.code == "invalid_params"

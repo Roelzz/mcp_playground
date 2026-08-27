@@ -43,7 +43,7 @@ def test_build_server_rejects_unknown_slug(conn: sqlite3.Connection) -> None:
 def test_get_tool_requires_only_the_id_param(conn: sqlite3.Connection) -> None:
     schema = _tools(conn)["get_order"].parameters
     assert schema["required"] == ["id"]
-    assert set(schema["properties"]) == {"id"}
+    assert set(schema["properties"]) == {"id", "expand"}
     assert schema["properties"]["id"]["type"] == "integer"
 
 
@@ -155,3 +155,38 @@ def test_field_schema_drives_param_types(conn: sqlite3.Connection) -> None:
 def test_generated_schema_is_json_serialisable(conn: sqlite3.Connection) -> None:
     for tool in _tools(conn).values():
         json.dumps(tool.parameters)
+
+
+# ---------------------------------------------------------------------------
+# expand tests
+# ---------------------------------------------------------------------------
+
+
+def test_tool_count_unchanged_after_expand(conn: sqlite3.Connection) -> None:
+    assert len(_tools(conn)) == 7
+
+
+def test_read_tools_expose_optional_expand_param(conn: sqlite3.Connection) -> None:
+    tools = _tools(conn)
+    for name in ("list_orders", "search_orders", "get_order", "list_order_lines"):
+        schema = tools[name].parameters
+        props = schema.get("properties", {})
+        assert "expand" in props, f"{name} missing expand param"
+        required = schema.get("required", [])
+        assert "expand" not in required, f"{name} expand should be optional"
+
+
+def test_write_tools_do_not_expose_expand_param(conn: sqlite3.Connection) -> None:
+    tools = _tools(conn)
+    for name in ("create_order", "update_order", "delete_order"):
+        schema = tools[name].parameters
+        props = schema.get("properties", {})
+        assert "expand" not in props, f"{name} must not have expand param"
+
+
+def test_list_with_expand_returns_expanded_key(conn: sqlite3.Connection) -> None:
+    rows = _call(conn, "list_order_lines", {"expand": "order", "limit": 50})
+    assert rows
+    for row in rows:
+        assert "order" in row
+        assert isinstance(row["order"], dict)

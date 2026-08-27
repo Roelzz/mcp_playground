@@ -16,7 +16,7 @@ import executor
 import service
 
 IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-RESERVED_PARAMS = {"limit", "q"}
+RESERVED_PARAMS = {"limit", "q", "expand"}
 LIST_LIKE = {"list", "search"}
 
 PY_TYPES: dict[str, type] = {
@@ -61,12 +61,25 @@ def _tool_params(
         for name, py_type in fields.items():
             params.append((name, py_type, f"Filter on exact {name}.", None))
         params.append(("limit", int, "Maximum number of results to return.", 50))
+        params.append((
+            "expand",
+            str,
+            "Comma-separated relationship expand names to include inline on each result.",
+            None,
+        ))
         return params
 
     if tool_type == "get" or tool_type == "delete":
         param = path_param or id_field
         py_type = fields.get(id_field, str)
         params.append((param, py_type, f"The {id_field} of the record.", REQUIRED))
+        if tool_type == "get":
+            params.append((
+                "expand",
+                str,
+                "Comma-separated relationship expand names to include inline on the result.",
+                None,
+            ))
         return params
 
     if tool_type == "create":
@@ -134,8 +147,16 @@ def build_server(conn: sqlite3.Connection, slug: str) -> FastMCP:
     for endpoint in service.list_endpoints(conn, int(server_row["id"])):
         dataset = service.get_dataset(conn, int(endpoint["dataset_id"]))
         path_param = executor.path_param_name(str(endpoint["path"]))
+        tool_type = str(endpoint["tool_type"])
+        description = str(endpoint["description"] or "")
+        if tool_type in {"list", "search", "get"}:
+            expands = service.available_expands(conn, int(endpoint["dataset_id"]))
+            if expands:
+                names = ", ".join(e["name"] for e in expands)
+                suffix = f"Available expand names: {names}."
+                description = (description + "\n\n" if description else "") + suffix
         params = _tool_params(
-            str(endpoint["tool_type"]),
+            tool_type,
             dataset.get("field_schema") or {},
             str(dataset["id_field"]),
             path_param,
@@ -145,7 +166,7 @@ def build_server(conn: sqlite3.Connection, slug: str) -> FastMCP:
                 conn,
                 slug,
                 str(endpoint["tool_name"]),
-                str(endpoint["description"] or ""),
+                description,
                 params,
             )
         )

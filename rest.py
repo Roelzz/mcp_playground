@@ -63,6 +63,10 @@ async def handle(slug: str, rest_path: str, request: Request, conn: Conn) -> Res
         return body_params
 
     merged = {**dict(request.query_params), **body_params, **path_params}
+    # Support ?expand=a&expand=b (repeated key) in addition to ?expand=a,b.
+    expand_list = request.query_params.getlist("expand")
+    if len(expand_list) > 1:
+        merged["expand"] = expand_list
     params = {key: value for key, value in merged.items() if value is not None}
 
     try:
