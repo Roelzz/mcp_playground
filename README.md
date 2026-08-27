@@ -52,6 +52,41 @@ Copy `.env.example` to `.env` and edit values for your environment.
 | `BOOTSTRAP_PASSWORD` | Optional initial admin password. Leave blank to auto-generate credentials on first boot. | blank |
 | `INSECURE_COOKIES` | Set to `1` when serving over plain HTTP on a LAN so session cookies still work. | `0` |
 
+## Calling a server over plain REST
+
+Every server is exposed twice from the same endpoint definitions.
+
+| Surface | URL | Use it for |
+| --- | --- | --- |
+| MCP | `/mcp/{slug}` | Copilot Studio MCP onboarding wizard |
+| REST | `/mock/{slug}` | Custom connectors, Postman, curl, any HTTP client |
+
+The REST surface uses the endpoint's own method and path verbatim.
+
+```bash
+curl http://localhost:2009/mock/contoso-orders/orders?limit=5
+curl http://localhost:2009/mock/contoso-orders/orders/1001
+curl "http://localhost:2009/mock/contoso-orders/orders?status=open"
+curl "http://localhost:2009/mock/contoso-orders/orders/search?q=northwind"
+curl -X POST http://localhost:2009/mock/contoso-orders/orders \
+  -H 'content-type: application/json' \
+  -d '{"customer":"Fabrikam","status":"open","total":42}'
+curl -X DELETE http://localhost:2009/mock/contoso-orders/orders/1001
+```
+
+Query string, JSON body and path placeholders are merged into one flat parameter set. Create returns `201`, everything else returns `200`.
+
+When a server's authentication is set to API key, send the key as `X-API-Key: <key>` or `Authorization: Bearer <key>`.
+
+### Importing into Power Platform as a custom connector
+
+The Swagger export at `/api/servers/{id}/swagger` describes this REST surface, so it imports directly as a custom connector.
+
+1. Download the Swagger from the server's **Connect it** tab.
+2. Open Power Apps or Power Automate, go to **Custom connectors**.
+3. Choose **New custom connector > Import an OpenAPI file**.
+4. Add the connector to your agent in Copilot Studio.
+
 ## Data & persistence
 
 MCP Playground has three data tiers.

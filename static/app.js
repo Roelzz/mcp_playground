@@ -82,6 +82,14 @@
     return server ? window.location.origin + "/mcp/" + server.slug : "";
   }
 
+  function restBaseUrl(server) {
+    return server ? window.location.origin + "/mock/" + server.slug : "";
+  }
+
+  function restUrl(server, endpoint) {
+    return server && endpoint ? restBaseUrl(server) + endpoint.path : "";
+  }
+
   function llmUrl(llm) {
     return llm ? window.location.origin + "/v1/" + llm.slug + "/chat/completions" : "";
   }
@@ -332,7 +340,13 @@
       "<div class=\"tabs-note\"><strong>Inferred tool_type:</strong> <span id=\"tool-type-preview\"></span></div>" + input("tool_name", "Tool name", editing && editing.tool_name, "list_orders") + area("description", "Description", editing && editing.description, "What this tool does") + datasetSelect(editing && editing.dataset_id) +
       "<div class=\"form-row\" id=\"summary-fields-row\"><label>Summary fields</label><input name=\"summary_fields\" value=\"" + esc((editing && editing.summary_fields || []).join(", ")) + "\" placeholder=\"id, name, status\"><span class=\"help\">Only valid on list/search endpoints.</span></div>" +
       "<div class=\"actions\"><button class=\"btn primary\" type=\"submit\"" + disabledIfReadonly() + ">" + (editing ? "Save endpoint" : "Create endpoint") + "</button>" + (editing ? "<button class=\"btn\" type=\"button\" data-action=\"cancel-endpoint-edit\">Cancel</button>" : "") + "</div></form></section>" +
-      "<section class=\"panel\"><h2>Tools</h2>" + endpointsTable() + "</section></div>");
+      "<section class=\"panel\"><h2>Tools</h2>" + restBaseCallout() + endpointsTable() + "</section></div>");
+  }
+
+  function restBaseCallout() {
+    var server = selectedServer();
+    if (!server) return "";
+    return "<div class=\"tabs-note\"><strong>REST base URL</strong><div class=\"url-row\" style=\"margin-top:6px\"><span class=\"url-text\">" + esc(restBaseUrl(server)) + "</span><button class=\"btn small\" data-copy=\"" + esc(restBaseUrl(server)) + "\">Copy</button></div><span class=\"help\">Every endpoint below is callable over plain REST at this base and is described by the Swagger export.</span></div>";
   }
 
   function datasetSelect(selected) {
@@ -345,7 +359,7 @@
     if (!state.endpoints.length) return "<div class=\"empty\">No endpoints for this server.</div>";
     return "<div class=\"table-wrap\"><table><thead><tr><th>Tool</th><th>Method</th><th>Path</th><th>Type</th><th>Dataset</th><th></th></tr></thead><tbody>" + state.endpoints.map(function (e) {
       var ds = state.datasets.find(function (d) { return d.id === e.dataset_id; });
-      return "<tr><td><strong>" + esc(e.tool_name) + "</strong><div class=\"help\">" + esc(e.description || "") + "</div></td><td>" + esc(e.method) + "</td><td><code>" + esc(e.path) + "</code></td><td><span class=\"badge\">" + esc(e.tool_type || "?") + "</span></td><td>" + esc(ds ? ds.key : e.dataset_id) + "</td><td><div class=\"actions\"><button class=\"btn small\" data-action=\"edit-endpoint\" data-id=\"" + e.id + "\"" + disabledIfReadonly() + ">Edit</button><button class=\"btn small danger\" data-action=\"delete-endpoint\" data-id=\"" + e.id + "\" data-name=\"" + esc(e.tool_name) + "\"" + disabledIfReadonly() + ">Delete</button></div></td></tr>";
+      return "<tr><td><strong>" + esc(e.tool_name) + "</strong><div class=\"help\">" + esc(e.description || "") + "</div></td><td>" + esc(e.method) + "</td><td><code>" + esc(e.path) + "</code><div class=\"help\">" + esc(restUrl(selectedServer(), e)) + " <button class=\"btn small\" data-copy=\"" + esc(restUrl(selectedServer(), e)) + "\">Copy</button></div></td><td><span class=\"badge\">" + esc(e.tool_type || "?") + "</span></td><td>" + esc(ds ? ds.key : e.dataset_id) + "</td><td><div class=\"actions\"><button class=\"btn small\" data-action=\"edit-endpoint\" data-id=\"" + e.id + "\"" + disabledIfReadonly() + ">Edit</button><button class=\"btn small danger\" data-action=\"delete-endpoint\" data-id=\"" + e.id + "\" data-name=\"" + esc(e.tool_name) + "\"" + disabledIfReadonly() + ">Delete</button></div></td></tr>";
     }).join("") + "</tbody></table></div>";
   }
 
@@ -406,7 +420,10 @@
     return pageHeader("Connect it", "Copy the exact fields into Microsoft Copilot Studio's Add MCP server dialog.") + serverSelectHtml() +
       (!server ? "" : "<section class=\"panel\"><div class=\"callout warn\"><strong>Generative orchestration must be ON in the agent's settings — the MCP tools will not be called otherwise.</strong></div><div class=\"callout warn\" style=\"margin-top:10px\">DLP: the tenant's Data Loss Prevention policy may block a custom/unclassified connector. A maker may need an admin to allow it.</div><h2>Copilot Studio fields</h2>" +
       copyLine("Server name", server.name) + copyLine("Server description", server.description || "Synthetic MCP server from MCP Playground") + copyLine("Server URL", endpointUrl(server)) + copyLine("Authentication", server.auth_mode === "api_key" ? "API key" : "No authentication") +
-      "<h3>Steps</h3><ol><li>Open the agent in Copilot Studio.</li><li>Go to Tools, then Add tool, then MCP server.</li><li>Paste the fields above.</li><li>Turn generative orchestration ON in agent settings.</li><li>If using API key authentication, create or reuse a key in the API keys tab.</li></ol></section>");
+      "<h3>Steps</h3><ol><li>Open the agent in Copilot Studio.</li><li>Go to Tools, then Add tool, then MCP server.</li><li>Paste the fields above.</li><li>Turn generative orchestration ON in agent settings.</li><li>If using API key authentication, create or reuse a key in the API keys tab.</li></ol></section>" +
+      "<section class=\"panel\"><h2>Or connect it as a REST custom connector</h2><p class=\"help\">The same endpoints are also served as plain REST. Export the Swagger and import it in Power Platform as a custom connector.</p>" +
+      copyLine("REST base URL", restBaseUrl(server)) + copyLine("Swagger export", window.location.origin + "/api/servers/" + server.id + "/swagger") +
+      "<h3>Steps</h3><ol><li>Download the Swagger from the Servers tab.</li><li>Open Power Apps or Power Automate, then Custom connectors, then New, then Import an OpenAPI file.</li><li>Upload the file and create the connector.</li><li>Add the connector to the agent in Copilot Studio under Tools.</li></ol></section>");
   }
 
   function copyLine(label, value) {
