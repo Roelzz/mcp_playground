@@ -37,10 +37,12 @@
     testElapsed: null,
     testMode: "rest",
     testTool: null,
+    testSearch: "",
     testParams: "{}",
     testStatus: null,
     testCurl: null,
     testApiKey: "",
+    connectPlatform: "copilot",
     editingServerId: null,
     editingDatasetId: null,
     editingEndpointId: null,
@@ -400,32 +402,71 @@
       select("rule_match_type_" + i, "Match type", rule.match_type, [["always","always"],["contains","contains"],["regex","regex"]]) + input("rule_match_value_" + i, "Match value", rule.match_value, "leave empty for always") + area("rule_response_" + i, "Response", rule.response, "Mock response text") + "</div>";
   }
 
+  function toolTypeForEndpoint(endpoint) {
+    return inferToolType(endpoint.method, endpoint.path) || endpoint.tool_type || "tool";
+  }
+
+  function toolTypeLabel(type) {
+    return String(type || "tool").toUpperCase();
+  }
+
+  function selectedTestEndpoint() {
+    var selected = state.testTool || (state.endpoints[0] ? state.endpoints[0].tool_name : "");
+    return state.endpoints.find(function (e) { return e.tool_name === selected; }) || state.endpoints[0] || null;
+  }
+
+  function toolRailHtml(selected) {
+    if (!state.endpoints.length) return "<div class=\"empty\">No tools for this server yet.</div>";
+    var order = ["list", "get", "search", "create", "update", "delete", "tool"];
+    var groups = {};
+    state.endpoints.forEach(function (endpoint) {
+      var type = toolTypeForEndpoint(endpoint);
+      if (!groups[type]) groups[type] = [];
+      groups[type].push(endpoint);
+    });
+    var html = order.concat(Object.keys(groups).filter(function (type) { return order.indexOf(type) === -1; })).filter(function (type, index, arr) {
+      return arr.indexOf(type) === index && groups[type] && groups[type].length;
+    }).map(function (type) {
+      return "<div class=\"tool-group\" data-tool-group=\"" + esc(type) + "\"><div class=\"tool-group-title\">" + esc(toolTypeLabel(type)) + "</div>" +
+        groups[type].map(function (endpoint) {
+          var search = [endpoint.tool_name, endpoint.method, endpoint.path, type].join(" ").toLowerCase();
+          return "<button type=\"button\" class=\"tool-row " + (endpoint.tool_name === selected ? "active" : "") + "\" data-action=\"select-test-tool\" data-tool=\"" + esc(endpoint.tool_name) + "\" data-search=\"" + esc(search) + "\"><span class=\"tool-type-badge\" data-type=\"" + esc(type) + "\">" + esc(type) + "</span><span class=\"kv\"><span class=\"tool-name\">" + esc(endpoint.tool_name) + "</span><span class=\"tool-meta\">" + esc(endpoint.method + " " + endpoint.path) + "</span></span></button>";
+        }).join("") + "</div>";
+    }).join("");
+    return "<input id=\"tool-search\" class=\"tool-search\" value=\"" + esc(state.testSearch) + "\" placeholder=\"Search " + esc(state.endpoints.length) + " tools…\">" +
+      "<div class=\"tool-groups\">" + html + "</div><div id=\"tool-no-results\" class=\"empty\" hidden>No tools match that search.</div>";
+  }
+
+  function responseStatusState() {
+    if (state.testStatus == null) return "idle";
+    return state.testStatus >= 400 ? "bad" : "ok";
+  }
+
+  function responseHtml() {
+    if (state.testResult === null && state.testStatus === null) return "<div class=\"response-placeholder\">No request sent yet.</div>";
+    return "<p class=\"help\"><span class=\"status-pill\" data-state=\"" + esc(responseStatusState()) + "\">HTTP " + esc(state.testStatus) + "</span> · Elapsed: " + esc(state.testElapsed) + " ms</p>" +
+      (state.testCurl ? "<div class=\"url-row\"><span class=\"url-text\">" + esc(state.testCurl) + "</span><button class=\"btn small\" data-copy=\"" + esc(state.testCurl) + "\">Copy</button></div>" : "") +
+      "<pre class=\"prebox\">" + esc(pretty(state.testResult)) + "</pre>";
+  }
+
   function renderTestConsole() {
     var server = selectedServer();
     var header = pageHeader("Test console", "Call an endpoint over plain REST the way a custom connector does, or through the internal executor path.") + serverSelectHtml();
     if (!server) return header;
-    var selected = state.testTool || (state.endpoints[0] ? state.endpoints[0].tool_name : "");
-    var tools = state.endpoints.map(function (e) {
-      return "<option value=\"" + esc(e.tool_name) + "\"" + (e.tool_name === selected ? " selected" : "") + ">" + esc(e.tool_name) + " — " + esc(e.method) + " " + esc(e.path) + "</option>";
-    }).join("");
+    var endpoint = selectedTestEndpoint();
+    var selected = endpoint ? endpoint.tool_name : "";
     var modes = [["rest", "REST — /mock/" + server.slug], ["executor", "Executor — /api/servers/…/tools/…/call"]].map(function (m) {
-      return "<option value=\"" + m[0] + "\"" + (state.testMode === m[0] ? " selected" : "") + ">" + esc(m[1]) + "</option>";
+      return "<option value=\"" + esc(m[0]) + "\"" + (state.testMode === m[0] ? " selected" : "") + ">" + esc(m[1]) + "</option>";
     }).join("");
     var keyRow = state.testMode === "rest" && server.auth_mode === "api_key"
       ? "<div class=\"form-row\"><label>API key</label><input name=\"api_key\" value=\"" + esc(state.testApiKey) + "\" placeholder=\"mcpp_…\"><span class=\"help\">This server requires a key. Sent as <code>X-API-Key</code>; the admin session cookie is not used.</span></div>"
       : "";
-    var form = "<section class=\"panel\"><form class=\"form-grid\" data-form=\"tool-call\">" +
-      "<div class=\"form-row\"><label>Surface</label><select name=\"mode\" id=\"test-mode\">" + modes + "</select><span class=\"help\">REST is what Power Platform calls and can exercise writes. Executor is admin-gated and read-only.</span></div>" +
-      "<div class=\"form-row\"><label>Tool</label><select name=\"tool_name\" id=\"tool-select\">" + tools + "</select></div>" +
-      "<div id=\"tool-help\" class=\"tabs-note\"></div>" + keyRow +
-      "<div class=\"form-row\"><label>Parameters JSON</label><textarea class=\"json\" name=\"params\">" + esc(state.testParams) + "</textarea></div>" +
-      "<button class=\"btn primary\" type=\"submit\">Send</button></form></section>";
-    var body = state.testResult === null && state.testStatus === null
-      ? "<div class=\"empty\">No call yet.</div>"
-      : "<p class=\"help\">" + (state.testStatus === null ? "" : "<span class=\"badge" + (state.testStatus >= 400 ? " bad" : "") + "\">HTTP " + esc(state.testStatus) + "</span> · ") + "Elapsed: " + esc(state.testElapsed) + " ms</p>" +
-        (state.testCurl ? "<div class=\"url-row\"><span class=\"url-text\">" + esc(state.testCurl) + "</span><button class=\"btn small\" data-copy=\"" + esc(state.testCurl) + "\">Copy</button></div>" : "") +
-        "<pre class=\"prebox\">" + esc(pretty(state.testResult)) + "</pre>";
-    return header + "<div class=\"two-col\">" + form + "<section class=\"panel\"><h2>Result</h2>" + body + "</section></div>";
+    return header + "<section class=\"panel test-panel\"><div class=\"panel-heading\"><div><h2>Try it before you wire it up</h2><p>This console calls the real endpoint. The responses are live, not canned.</p></div><span class=\"status-pill\" data-state=\"connected\">" + esc(state.endpoints.length) + " tools · connected</span></div>" +
+      "<form data-form=\"tool-call\"><input type=\"hidden\" name=\"tool_name\" id=\"tool-select\" value=\"" + esc(selected) + "\"><div class=\"tool-console-grid\"><aside class=\"tool-rail\">" + toolRailHtml(selected) + "</aside>" +
+      "<section class=\"request-pane\"><div class=\"request-lead\"><div><h3>Pick a tool to build a request.</h3><p id=\"tool-help\" class=\"help\"></p></div><button class=\"btn primary\" type=\"submit\"" + (selected ? "" : " disabled") + ">Run tool ▸</button></div>" +
+      "<div class=\"form-grid\"><div class=\"form-row\"><label>Surface</label><select name=\"mode\" id=\"test-mode\">" + modes + "</select><span class=\"help\">REST is what Power Platform calls and can exercise writes. Executor is admin-gated and read-only.</span></div>" +
+      keyRow + "<div class=\"form-row\"><label>Parameters JSON</label><textarea class=\"json\" name=\"params\">" + esc(state.testParams) + "</textarea></div></div>" +
+      "<div class=\"section-divider\"></div><div class=\"response-block\"><div class=\"response-head\">Response <span class=\"status-pill\" data-state=\"" + esc(responseStatusState()) + "\">" + esc(state.testStatus == null ? "idle" : "HTTP " + state.testStatus) + "</span></div>" + responseHtml() + "</div></section></div></form></section>";
   }
 
   function buildRestRequest(server, endpoint, params) {
@@ -480,17 +521,62 @@
 
   function renderConnect() {
     var server = selectedServer();
-    return pageHeader("Connect it", "Copy the exact fields into Microsoft Copilot Studio's Add MCP server dialog.") + serverSelectHtml() +
-      (!server ? "" : "<section class=\"panel\"><div class=\"callout warn\"><strong>Generative orchestration must be ON in the agent's settings — the MCP tools will not be called otherwise.</strong></div><div class=\"callout warn\" style=\"margin-top:10px\">DLP: the tenant's Data Loss Prevention policy may block a custom/unclassified connector. A maker may need an admin to allow it.</div><h2>Copilot Studio fields</h2>" +
-      copyLine("Server name", server.name) + copyLine("Server description", server.description || "Synthetic MCP server from MCP Playground") + copyLine("Server URL", endpointUrl(server)) + copyLine("Authentication", server.auth_mode === "api_key" ? "API key" : "No authentication") +
-      "<h3>Steps</h3><ol><li>Open the agent in Copilot Studio.</li><li>Go to Tools, then Add tool, then MCP server.</li><li>Paste the fields above.</li><li>Turn generative orchestration ON in agent settings.</li><li>If using API key authentication, create or reuse a key in the API keys tab.</li></ol></section>" +
-      "<section class=\"panel\"><h2>Or connect it as a REST custom connector</h2><p class=\"help\">The same endpoints are also served as plain REST. Export the Swagger and import it in Power Platform as a custom connector.</p>" +
-      copyLine("REST base URL", restBaseUrl(server)) + copyLine("Swagger export", window.location.origin + "/api/servers/" + server.id + "/swagger") +
-      "<h3>Steps</h3><ol><li>Download the Swagger from the Servers tab.</li><li>Open Power Apps or Power Automate, then Custom connectors, then New, then Import an OpenAPI file.</li><li>Upload the file and create the connector.</li><li>Add the connector to the agent in Copilot Studio under Tools.</li></ol></section>");
+    return pageHeader("Connect it", "Copy the exact fields into Microsoft setup screens.") + serverSelectHtml() +
+      (!server ? "" : "<section class=\"panel connect-panel\"><div class=\"panel-heading\"><div><h2>Connect it to your assistant</h2><p>Pick your platform. The fields below change to match its own setup screen.</p></div></div>" +
+      platformTabsHtml() + connectStepsHtml() + authGroupHtml(server) + connectFieldsHtml(server) +
+      "<div class=\"callout warn\"><strong>Generative orchestration must be ON in the agent's settings — the MCP tools will not be called otherwise.</strong></div>" +
+      "<div class=\"callout info\"><strong>💡 DLP:</strong> the tenant's Data Loss Prevention policy may block a custom/unclassified connector. A maker may need an admin to allow it.</div></section>");
   }
 
-  function copyLine(label, value) {
-    return "<div class=\"copy-line\"><strong>" + esc(label) + "</strong><span class=\"url-text\">" + esc(value) + "</span><button class=\"btn small\" data-copy=\"" + esc(value) + "\">Copy</button></div>";
+  function platformTabsHtml() {
+    var platforms = [
+      ["copilot", "◇", "Copilot Studio"],
+      ["automate", "⚡", "Power Automate"],
+      ["apps", "▣", "Power Apps"],
+      ["vscode", "⌘", "VS Code"],
+      ["http", "{}", "Raw HTTP"]
+    ];
+    if (!state.connectPlatform || !platforms.some(function (p) { return p[0] === state.connectPlatform; })) state.connectPlatform = "copilot";
+    return "<div class=\"platform-tabs\">" + platforms.map(function (platform) {
+      return "<button type=\"button\" class=\"platform-tab " + (state.connectPlatform === platform[0] ? "active" : "") + "\" data-action=\"select-connect-platform\" data-platform=\"" + esc(platform[0]) + "\"><span class=\"platform-icon\">" + esc(platform[1]) + "</span>" + esc(platform[2]) + "</button>";
+    }).join("") + "</div>";
+  }
+
+  function connectStepsHtml() {
+    var steps = {
+      copilot: [["Open tools", "In Copilot Studio, open the agent and go to Tools."], ["Add MCP server", "Choose Add tool, then MCP server, and paste the server fields."], ["Enable orchestration", "Turn generative orchestration on and add an API key if required."]],
+      automate: [["Export OpenAPI", "Copy the Swagger export URL or download it from the server."], ["Create connector", "In Power Automate, create a custom connector from OpenAPI."], ["Use in flows", "Create a connection and call the REST operations from a flow."]],
+      apps: [["Export OpenAPI", "Use the Swagger export for this server's REST endpoints."], ["Create connector", "In Power Apps, create a custom connector from OpenAPI."], ["Add to app", "Create a connection, then use the connector actions in formulas."]],
+      vscode: [["Copy server URL", "Use the MCP server URL in your MCP-capable VS Code client."], ["Set auth header", "If API key auth is enabled, send X-API-Key with a key from this app."], ["Test calls", "Run a tool call against the selected server before training."]],
+      http: [["Copy REST base", "Use the REST base URL for direct endpoint calls."], ["Send request", "Send JSON bodies for write methods and query strings for reads."], ["Add auth header", "If required, include X-API-Key with each request."]]
+    };
+    var selected = steps[state.connectPlatform] || steps.copilot;
+    return "<div class=\"step-list\">" + selected.map(function (step, index) {
+      return "<div class=\"step-card\"><div class=\"step-number\">" + esc(index + 1) + "</div><div><div class=\"step-title\">" + esc(step[0]) + "</div><div class=\"help\">" + esc(step[1]) + "</div></div></div>";
+    }).join("") + "</div>";
+  }
+
+  function connectFieldsHtml(server) {
+    var swaggerUrl = window.location.origin + "/api/servers/" + server.id + "/swagger";
+    var auth = server.auth_mode === "api_key" ? "API key" : "No authentication";
+    var sets = {
+      copilot: [["Server name", server.name, true], ["Server description", server.description || "Synthetic MCP server from MCP Playground", true], ["Server URL", endpointUrl(server), true], ["Authentication", auth, false], ["REST base URL", restBaseUrl(server), false], ["Swagger export URL", swaggerUrl, false]],
+      automate: [["REST base URL", restBaseUrl(server), true], ["Swagger export URL", swaggerUrl, true], ["Authentication", auth, false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from MCP Playground", false], ["Server URL", endpointUrl(server), false]],
+      apps: [["REST base URL", restBaseUrl(server), true], ["Swagger export URL", swaggerUrl, true], ["Authentication", auth, false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from MCP Playground", false], ["Server URL", endpointUrl(server), false]],
+      vscode: [["Server name", server.name, true], ["Server URL", endpointUrl(server), true], ["Authentication", auth, false], ["Server description", server.description || "Synthetic MCP server from MCP Playground", false], ["REST base URL", restBaseUrl(server), false], ["Swagger export URL", swaggerUrl, false]],
+      http: [["REST base URL", restBaseUrl(server), true], ["Authentication", auth, false], ["Swagger export URL", swaggerUrl, false], ["Server URL", endpointUrl(server), false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from MCP Playground", false]]
+    };
+    var fields = sets[state.connectPlatform] || sets.copilot;
+    return "<div class=\"step-copy-grid\">" + fields.map(function (field) { return copyLine(field[0], field[1], field[2]); }).join("") + "</div>";
+  }
+
+  function authGroupHtml(server) {
+    var hasKey = server.auth_mode === "api_key";
+    return "<div class=\"form-row\"><label>Authentication</label><div class=\"auth-pill\"><label class=\"auth-option\"><input type=\"radio\" disabled" + (!hasKey ? " checked" : "") + "> None</label><label class=\"auth-option\"><input type=\"radio\" disabled" + (hasKey ? " checked" : "") + "> API key</label><label class=\"auth-option\"><input type=\"radio\" disabled> OAuth 2.0</label></div><span class=\"help\">MCP Playground currently emits no-auth or API-key setup values. API keys are sent as <code>X-API-Key</code>.</span></div>";
+  }
+
+  function copyLine(label, value, required) {
+    return "<div class=\"copy-line\"><strong>" + esc(label) + (required ? "<span class=\"field-required\">*</span>" : "") + "</strong><div class=\"copy-control\"><span class=\"url-text\">" + esc(value) + "</span><button class=\"btn small\" data-copy=\"" + esc(value) + "\">Copy</button></div></div>";
   }
 
   function renderKeys() {
@@ -526,6 +612,7 @@
     updateToolTypePreview();
     updateProxyFields();
     updateToolHelp();
+    applyToolSearch();
     updateDatasetPreview();
   }
 
@@ -643,12 +730,30 @@
     var endpoint = state.endpoints.find(function (e) { return e.tool_name === selectEl.value; });
     if (!endpoint) { help.textContent = "No tools for this server."; return; }
     var param = (endpoint.path.match(/\{([^}]+)\}/) || [])[1];
-    var hints = "<strong>" + esc(endpoint.method + " " + endpoint.path) + "</strong> · " + esc(endpoint.tool_type) + (param ? " · requires parameter <code>" + esc(param) + "</code>" : "") + (endpoint.tool_type === "search" ? " · optional <code>q</code> and <code>limit</code>" : endpoint.tool_type === "list" ? " · optional filters and <code>limit</code>" : "");
+    var type = toolTypeForEndpoint(endpoint);
+    var hints = "<strong>" + esc(endpoint.method + " " + endpoint.path) + "</strong> · " + esc(type) + (param ? " · requires parameter <code>" + esc(param) + "</code>" : "") + (type === "search" ? " · optional <code>q</code> and <code>limit</code>" : type === "list" ? " · optional filters and <code>limit</code>" : "");
     if (state.testMode === "rest") {
       var sendsBody = ["POST", "PUT", "PATCH"].indexOf(String(endpoint.method).toUpperCase()) !== -1;
       hints += "<div class=\"help\" style=\"margin-top:6px\">Calls <code>" + esc(restUrl(selectedServer(), endpoint)) + "</code>. Path placeholders are filled from the parameters; the rest go in the " + (sendsBody ? "JSON body" : "query string") + ".</div>";
     }
     help.innerHTML = hints;
+  }
+
+  function applyToolSearch() {
+    var inputEl = document.getElementById("tool-search");
+    if (!inputEl) return;
+    var query = inputEl.value.toLowerCase();
+    var any = false;
+    Array.prototype.forEach.call(document.querySelectorAll(".tool-row"), function (row) {
+      var match = !query || String(row.dataset.search || "").indexOf(query) !== -1;
+      row.hidden = !match;
+      if (match) any = true;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".tool-group"), function (group) {
+      group.hidden = !Array.prototype.some.call(group.querySelectorAll(".tool-row"), function (row) { return !row.hidden; });
+    });
+    var empty = document.getElementById("tool-no-results");
+    if (empty) empty.hidden = any;
   }
 
   function updateDatasetPreview() {
@@ -680,6 +785,10 @@
   }
 
   document.addEventListener("input", function (event) {
+    if (event.target.matches("#tool-search")) {
+      state.testSearch = event.target.value;
+      applyToolSearch();
+    }
     if (event.target.matches("form[data-form='endpoint'] input[name='path']")) updateToolTypePreview();
     if (event.target.matches("form[data-form='dataset'] textarea, form[data-form='dataset'] select")) updateDatasetPreview();
   });
@@ -751,6 +860,7 @@
       if (action === "edit-endpoint") { state.editingEndpointId = Number(button.dataset.id); render(); }
       if (action === "cancel-endpoint-edit") { state.editingEndpointId = null; render(); }
       if (action === "delete-endpoint") await deleteItem("endpoint", button.dataset.id, button.dataset.name, "/api/endpoints/" + button.dataset.id, async function () { await loadEndpoints(); });
+      if (action === "select-test-tool") { captureTestForm(); state.testTool = button.dataset.tool; render(); }
       if (action === "edit-llm") { state.editingLlmId = Number(button.dataset.id); await loadLlmDetail(state.editingLlmId); render(); }
       if (action === "cancel-llm-edit") { state.editingLlmId = null; state.llmRules = []; render(); }
       if (action === "delete-llm") await deleteItem("LLM endpoint", button.dataset.id, button.dataset.name, "/api/llm-endpoints/" + button.dataset.id, async function () { state.editingLlmId = null; await loadLlms(); });
@@ -761,6 +871,7 @@
       if (action === "refresh-traffic") await loadTrafficAndRender();
       if (action === "clear-traffic") await clearTraffic();
       if (action === "toggle-traffic") { state.expandedTraffic = String(state.expandedTraffic) === String(button.dataset.id) ? null : button.dataset.id; render(); }
+      if (action === "select-connect-platform") { state.connectPlatform = button.dataset.platform; render(); }
       if (action === "dismiss-key") { state.newKey = null; render(); }
       if (action === "delete-key") await deleteItem("API key", button.dataset.id, button.dataset.name, "/api/keys/" + button.dataset.id, async function () { await loadKeys(); });
     } catch (err) {
