@@ -19,6 +19,7 @@ import db
 import llm
 import mcp_builder
 import portability
+import rest
 import seed
 import service
 from admin_mcp import build_admin_server
@@ -56,6 +57,7 @@ app.include_router(auth.router)
 app.include_router(api.router)
 app.include_router(llm.router)
 app.include_router(portability.router)
+app.include_router(rest.router)
 
 
 def _unauthorized(message: str):
