@@ -9,6 +9,30 @@ MCP Playground exposes every mock server through two independent surfaces. Pick 
 
 Both surfaces read the same datasets and enforce the same auth. Decide once, follow that path end to end.
 
+```mermaid
+flowchart TD
+    Start["Which path?"] --> DLP{"Does tenant DLP<br/>allow MCP?"}
+    DLP -->|No| B
+    DLP -->|Yes| Gen{"Generative<br/>orchestration ON?"}
+    Gen -->|"No, and can't turn it on"| B
+    Gen -->|Yes| Curate{"Do you need to pick<br/>individual tools?"}
+    Curate -->|"No — give the agent everything"| A
+    Curate -->|"Yes — curate per action"| B
+
+    A["✅ Path A — MCP server<br/>POST /mcp/{slug}<br/>all tools auto-discovered"]
+    B["🔧 Path B — Custom connector<br/>GET /mock/{slug}/…<br/>import Swagger, pick actions"]
+
+    classDef q fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
+    classDef good fill:#dff6dd,stroke:#107c10,stroke-width:2px,color:#0b2b0b
+    classDef alt fill:#fff4ce,stroke:#d29200,stroke-width:2px,color:#3b2f00
+
+    class Start,DLP,Gen,Curate q
+    class A good
+    class B alt
+```
+
+Path A is fewer steps and stays in sync automatically when you add a tool. Path B needs a Swagger re-import after every tool change, but it works when MCP is blocked and it lets you expose a subset.
+
 ---
 
 ## Bootcamp provisioning for trainers

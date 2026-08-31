@@ -1,5 +1,35 @@
 # Azure deployment runbook
 
+## 0. Current deployment
+
+| | |
+|---|---|
+| URL | `https://agent-playground.wittywave-8fdcd49f.westeurope.azurecontainerapps.io` |
+| Subscription | `cape-workshops-fy27` — `4a13d6aa-616a-4f12-a396-e8f4cb8761e0` |
+| Resource group | `rg-agent-playground` (westeurope) |
+| Container App | `agent-playground` |
+| Managed environment | `agent-playground-env` |
+| Storage account | `stepwfvd6ezxvpw`, file share `playground-data` |
+| Image | `ghcr.io/roelzz/mcp_playground` |
+| Admin user | `admin` — password is stored as the ACA secret `bootstrap-password`, never in this repo |
+
+> [!IMPORTANT]
+> Deploy **only** into `4a13d6aa-616a-4f12-a396-e8f4cb8761e0`. Set it explicitly before every
+> deploy — the CLI default subscription is not reliable, and a shared subscription with other
+> people's resource groups sits next to this one.
+>
+> ```bash
+> az account set --subscription 4a13d6aa-616a-4f12-a396-e8f4cb8761e0
+> az account show --query "{name:name, id:id}" -o table
+> ```
+
+Read the admin password back out of the running app when you need it:
+
+```bash
+az containerapp secret show -n agent-playground -g rg-agent-playground \
+  --secret-name bootstrap-password --query value -o tsv
+```
+
 ## 1. What gets deployed
 
 This deploys one Azure Container App in Consumption mode:
@@ -13,11 +43,23 @@ This deploys one Azure Container App in Consumption mode:
 
 ```mermaid
 flowchart LR
-    Admin["Trainer / admin browser"] -->|HTTPS| FQDN["*.azurecontainerapps.io"]
-    Attendees["Copilot Studio attendees"] -->|MCP / REST / OpenAPI| FQDN
+    Admin["🧑‍🏫 Trainer / admin browser"] -->|HTTPS| FQDN["🔒 *.azurecontainerapps.io<br/>free managed TLS"]
+    Attendees["👥 Copilot Studio attendees"] -->|MCP / REST / OpenAPI| FQDN
     FQDN --> ACA["Azure Container App<br/>0.5 vCPU / 1 GiB<br/>min=0 max=1"]
-    ACA -->|mount /data| Files["Azure Files SMB share<br/>playground.db"]
+    ACA -->|mount /data| Files[("Azure Files SMB share<br/>playground.db")]
     ACA -->|pull image| GHCR["Public ghcr.io package"]
+
+    classDef person fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
+    classDef edge fill:#fde7e9,stroke:#a4262c,stroke-width:2px,color:#3b1114
+    classDef azure fill:#e8dff5,stroke:#742774,stroke-width:2px,color:#2b1b2b
+    classDef data fill:#fff4ce,stroke:#d29200,stroke-width:2px,color:#3b2f00
+    classDef ext fill:#f3f2f1,stroke:#605e5c,stroke-width:2px,color:#201f1e
+
+    class Admin,Attendees person
+    class FQDN edge
+    class ACA azure
+    class Files data
+    class GHCR ext
 ```
 
 **`maxReplicas: 1` is a correctness constraint, not a performance setting.** SQLite tolerates exactly one writer. Horizontal scaling creates multiple writers against the same SMB-mounted database and breaks the contract.
@@ -87,6 +129,30 @@ curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $TOKEN" \
 
 `bootstrapPassword` is deliberately **not** in the parameters file. It is passed at deploy time and stored as an Azure Container Apps secret.
 
+```mermaid
+flowchart LR
+    Push["git push main"] --> Actions["GitHub Actions<br/>build-image.yml"]
+    Actions --> GHCR["ghcr.io/roelzz/mcp_playground<br/>:latest · :sha-xxxxxxx"]
+    Deploy["./deploy.sh"] --> Bicep["infra/main.bicep<br/>az deployment group create"]
+    Bicep --> RG["rg-agent-playground"]
+    RG --> Env["agent-playground-env"] --> App["agent-playground<br/>new revision"]
+    RG --> SA["stepwfvd6ezxvpw<br/>share playground-data"]
+    GHCR -->|image pull| App
+    SA -->|SMB mount /data| App
+
+    classDef ci fill:#f3f2f1,stroke:#605e5c,stroke-width:2px,color:#201f1e
+    classDef cli fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
+    classDef azure fill:#e8dff5,stroke:#742774,stroke-width:2px,color:#2b1b2b
+    classDef data fill:#fff4ce,stroke:#d29200,stroke-width:2px,color:#3b2f00
+
+    class Push,Actions,GHCR ci
+    class Deploy,Bicep cli
+    class RG,Env,App azure
+    class SA data
+```
+
+The two halves are independent: Actions only produces an image, `deploy.sh` only reconciles infrastructure. Re-running `deploy.sh` without a new image is safe and idempotent.
+
 ## 5. Environment variables in Azure
 
 | Variable | Azure value | Why |
@@ -138,22 +204,58 @@ It changes **only** if the app or the managed environment is deleted and recreat
 
 ## 7. Bootcamp day runbook
 
-Scale-to-zero means the first request after about 5 minutes idle takes 15–30s.
+Scale-to-zero means the first request after an idle period takes 15–30s.
+
+"Idle" is not a guess. The live scale config is:
+
+```json
+{"minReplicas": 0, "maxReplicas": 1, "cooldownPeriod": 300, "pollingInterval": 30}
+```
+
+- `cooldownPeriod: 300` — the replica shuts down 5 minutes after the **last** request, not 5 minutes after it started.
+- `pollingInterval: 30` — KEDA re-evaluates every 30s, so actual shutdown lands somewhere between 300 and 330 seconds.
+- Any request resets the timer. An open SSE connection on `/mcp/...` counts as active traffic, so an attendee with a live MCP session keeps the app warm for everyone.
+
+Read it back yourself:
+
+```bash
+az containerapp show -n agent-playground -g rg-agent-playground \
+  --query "properties.template.scale" -o json
+```
 
 Two concrete risks:
 
 - The first attendee of the day eats the cold start.
 - Copilot Studio's connector timeout can be shorter than the cold start. The connector test fails while nothing is actually broken.
 
+```mermaid
+flowchart LR
+    Zero["💤 0 replicas<br/>€0 · cold"]
+    Warm["⚡ 1 replica<br/>instant response"]
+    Zero -->|"first request<br/>15–30s cold start"| Warm
+    Warm -->|"300s with no traffic"| Zero
+    Warm -->|"any request resets the cooldown"| Warm
+
+    classDef cold fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
+    classDef hot fill:#dff6dd,stroke:#107c10,stroke-width:2px,color:#0b2b0b
+    class Zero cold
+    class Warm hot
+```
+
+Pin it warm on the day it matters:
+
 ```bash
 # morning of the bootcamp
-az containerapp update -n <app> -g <rg> --min-replicas 1
+az containerapp update -n agent-playground -g rg-agent-playground --min-replicas 1
 
 # after it ends
-az containerapp update -n <app> -g <rg> --min-replicas 0
+az containerapp update -n agent-playground -g rg-agent-playground --min-replicas 0
 ```
 
 Eight hours at `min=1` still fits inside the free grant. Costs nothing, removes the risk on the day it matters.
+
+> [!WARNING]
+> Leaving `min-replicas 1` on burns roughly 720 running hours a month, about €36. Set it back to `0`.
 
 ## 8. Migrating existing local data (optional)
 
@@ -205,6 +307,8 @@ Then:
 | Connectors point at `localhost` | `PUBLIC_BASE_URL` is wrong. | Set it to `https://<fqdn>` and re-export Swagger. |
 | `ImagePullBackOff` | GHCR package is private. | Make the package public in GitHub package settings, then restart the Container App. Public repos publish public packages automatically. |
 | No historical logs | Log Analytics is deliberately disabled. | Live streaming works. Attach a workspace temporarily if historical queries are needed. |
+| Bicep fails with `InvalidLogDestination` or a validation error on `appLogsConfiguration` | `destination: 'none'` is **not** a valid value, despite what the CLI flag `--logs-destination none` suggests. | "None" means *omit the property*. `infra/main.bicep` uses `appLogsConfiguration: {}`. Do not put a `destination` key back in. |
+| `docker.io` rate limit or unauthorised pull | Image reference lost its `ghcr.io/` prefix and resolved to Docker Hub. | Check `containerImage` in `infra/main.parameters.json` starts with `ghcr.io/`. |
 
 ## 11. Known limitations
 

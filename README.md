@@ -17,6 +17,45 @@ MCP Playground is a browser-managed playground for authoring persistent mock MCP
 | Public recipe playbooks | `/r/`, `/r/{slug}`, `/api/public/recipes` | open, read-only |
 | Health | `/health` | open |
 
+```mermaid
+flowchart LR
+    Trainer["🧑‍🏫 Trainer<br/>browser or AI agent"]
+    Attendee["👥 Attendees<br/>Copilot Studio / Cowork"]
+
+    subgraph App["MCP Playground"]
+        UI["Admin UI<br/>/ui/"]
+        AdminAPI["Admin API<br/>/api/*"]
+        AdminMCP["Management MCP<br/>/mcp/_admin — 57 tools"]
+        MockMCP["Mock MCP servers<br/>/mcp/{slug}"]
+        MockREST["REST mocks + Swagger<br/>/mock/{slug}/*"]
+        LLM["OpenAI-compatible<br/>/v1/{slug}/chat/completions"]
+        Store[("SQLite on /data<br/>definitions · live · seed")]
+    end
+
+    Trainer --> UI --> AdminAPI
+    Trainer --> AdminMCP --> AdminAPI
+    Attendee --> MockMCP
+    Attendee --> MockREST
+    Attendee --> LLM
+
+    AdminAPI --> Store
+    MockMCP --> Store
+    MockREST --> Store
+    LLM --> Store
+
+    classDef person fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
+    classDef admin fill:#e8dff5,stroke:#742774,stroke-width:2px,color:#2b1b2b
+    classDef mock fill:#dff6dd,stroke:#107c10,stroke-width:2px,color:#0b2b0b
+    classDef data fill:#fff4ce,stroke:#d29200,stroke-width:2px,color:#3b2f00
+
+    class Trainer,Attendee person
+    class UI,AdminAPI,AdminMCP admin
+    class MockMCP,MockREST,LLM mock
+    class Store data
+```
+
+Purple is trainer-only and needs admin auth. Green is what attendees consume. Everything reads and writes the same SQLite file, so a change made through the UI is instantly visible over MCP, REST, and Swagger.
+
 ## Quick start (local, no container)
 
 ```bash
@@ -276,6 +315,75 @@ Authentication: API key with `admin` scope, passed as `X-API-Key: <key>` or `Aut
 
 Everything the browser UI can do is also available as an MCP tool, with exactly three intentional exceptions: `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/me`. Those are browser-session-cookie endpoints and are meaningless over MCP, which has its own API key auth. `tests/test_mcp_parity.py` enforces this parity automatically so it cannot silently drift.
 
+### Setup
+
+You need an API key with `admin` scope. Create one in the UI (**API keys** tab) or over the API.
+
+**1. Log in and create a key**
+
+```bash
+BASE=http://localhost:2009        # or https://<your-fqdn>
+
+curl -s -c /tmp/pg.jar -X POST "$BASE/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<your-admin-password>"}'
+
+curl -s -b /tmp/pg.jar -X POST "$BASE/api/keys" \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"admin-mcp","scope":"admin"}'
+```
+
+The response contains the plaintext key **exactly once**. Copy it now — only a hash is stored. `scope` is `admin` (read + write) or `readonly`.
+
+**2. Verify the key works**
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$BASE/mcp/_admin" \
+  -H "X-API-Key: <your-key>" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+`200` means you are in. `401` means the key is missing, wrong, or lacks `admin` scope. `406` means the `Accept` header is missing `text/event-stream`.
+
+**3. Point an MCP client at it**
+
+```json
+{
+  "mcpServers": {
+    "playground-admin": {
+      "url": "https://<your-fqdn>/mcp/_admin",
+      "headers": { "X-API-Key": "<your-key>" }
+    }
+  }
+}
+```
+
+```mermaid
+flowchart LR
+    Agent["🤖 AI agent<br/>MCP client"]
+    Key{{"API key<br/>scope: admin"}}
+    Admin["/mcp/_admin<br/>57 tools"]
+    Work["Create servers · clone for teams<br/>load datasets · define endpoints<br/>manage recipes · inspect traffic"]
+
+    Agent -->|"X-API-Key header"| Key
+    Key -->|"401 if missing or readonly"| Admin
+    Admin --> Work
+
+    classDef person fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
+    classDef gate fill:#fde7e9,stroke:#a4262c,stroke-width:2px,color:#3b1114
+    classDef admin fill:#e8dff5,stroke:#742774,stroke-width:2px,color:#2b1b2b
+    classDef mock fill:#dff6dd,stroke:#107c10,stroke-width:2px,color:#0b2b0b
+
+    class Agent person
+    class Key gate
+    class Admin admin
+    class Work mock
+```
+
+Because every UI action has a tool equivalent, an agent can provision an entire bootcamp end to end: clone one source server into 20 team servers, seed their data, mint per-team API keys, and export the handouts — without opening the browser.
+
 Tools are grouped into nine areas:
 
 | Area | Tools |
@@ -308,11 +416,73 @@ Live data is the mutable runtime state used during a demo. It persists across re
 
 Seed data is an immutable snapshot. Reset to seed restores live data back to the snapshot. Save as seed promotes the current live data into the snapshot.
 
+```mermaid
+flowchart LR
+    Def["📐 Definitions<br/>servers · endpoints · datasets<br/>relationships · recipes"]
+    Live["🔄 Live data<br/>mutable demo rows"]
+    Seed["📦 Seed data<br/>immutable snapshot"]
+
+    Def -.->|"shape the rows"| Live
+    Live -->|"Save as seed"| Seed
+    Seed -->|"Reset to seed"| Live
+    Agents["🤖 Agent calls during a demo"] -->|"create · update · delete"| Live
+
+    classDef def fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
+    classDef live fill:#dff6dd,stroke:#107c10,stroke-width:2px,color:#0b2b0b
+    classDef seed fill:#fff4ce,stroke:#d29200,stroke-width:2px,color:#3b2f00
+    classDef ext fill:#f3f2f1,stroke:#605e5c,stroke-width:2px,color:#201f1e
+
+    class Def def
+    class Live live
+    class Seed seed
+    class Agents ext
+```
+
+All three tiers live in the same SQLite file and survive restarts. If an agent creates an order during a demo, that order is still there tomorrow — until someone resets to seed.
+
 The Compose setup uses the named Docker volume `playground-data` mounted at `/data`. That is what keeps SQLite data alive across `docker compose restart`, `docker compose down`, and later `docker compose up`. Deleting that volume wipes all definitions, live data, and seed data.
 
 ## Deployment
 
-Local container deployment is the quick-start path above: `docker compose up --build` (or `podman compose up --build`) exposes the app on port `2009` and persists SQLite in the `playground-data` volume. Azure deployment uses Container Apps, Azure Files, and a public GHCR image; follow **[AZURE.md](AZURE.md)** before handing URLs to attendees.
+Two supported targets.
+
+**Local container** — the quick-start path above: `docker compose up --build` (or `podman compose up --build`) exposes the app on port `2009` and persists SQLite in the `playground-data` volume.
+
+**Azure Container Apps** — scale-to-zero, under €1/month, HTTPS with a stable FQDN. Full runbook in **[AZURE.md](AZURE.md)**.
+
+```mermaid
+flowchart LR
+    Dev["💻 Local dev<br/>uv run · compose"]
+    GH["GitHub<br/>Roelzz/mcp_playground"]
+    Actions["GitHub Actions<br/>build-image.yml"]
+    GHCR["ghcr.io<br/>public image"]
+    Deploy["deploy.sh<br/>Bicep · one resource group"]
+    ACA["Azure Container Apps<br/>min=0 max=1 · managed TLS"]
+    Files[("Azure Files<br/>/data · SQLite")]
+
+    Dev -->|"git push"| GH --> Actions --> GHCR
+    Dev -->|"az login"| Deploy --> ACA
+    GHCR -->|"image pull"| ACA
+    ACA -->|"SMB mount"| Files
+
+    classDef local fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
+    classDef ci fill:#f3f2f1,stroke:#605e5c,stroke-width:2px,color:#201f1e
+    classDef azure fill:#e8dff5,stroke:#742774,stroke-width:2px,color:#2b1b2b
+    classDef data fill:#fff4ce,stroke:#d29200,stroke-width:2px,color:#3b2f00
+
+    class Dev local
+    class GH,Actions,GHCR ci
+    class Deploy,ACA azure
+    class Files data
+```
+
+Short version, assuming `az login` is done and `infra/main.parameters.json` is filled in:
+
+```bash
+BOOTSTRAP_PASSWORD='<pick-a-strong-password>' ./deploy.sh
+```
+
+Takes about three to four minutes and prints the FQDN when it finishes. Read AZURE.md first — two env vars (`SQLITE_JOURNAL_MODE=DELETE` and `SQLITE_VFS=unix-dotfile`) are mandatory on Azure Files, and `teardown.sh` permanently changes the URL.
 
 ## Development
 
@@ -357,4 +527,9 @@ upstream instead of a public mirror.
 
 ## Roadmap
 
-- Azure deployment.
+Azure deployment shipped — see [AZURE.md](AZURE.md). Nothing is currently blocking a bootcamp.
+
+Untested rather than broken, worth knowing before a large session:
+
+- No load test against a full 200-attendee cohort yet.
+- SQLite lock behaviour after a hard container kill (not a graceful restart) is unverified.
