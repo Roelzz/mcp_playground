@@ -18,12 +18,12 @@ Trainees do not log into MCP Playground. Trainers provision the mock servers fir
 1. Build one good source server, or use one of the seeded sample servers.
 2. Open the **Catalog** tab, the first tab in the sidebar.
 3. Use **Clone** for one copy, or **Bulk clone** to create one server per team.
-4. Open the **Cohort** tab, the second tab in the sidebar.
+4. Open the **Cohort** tab, the third tab in the sidebar.
 5. Filter to the team prefix, check readiness, then export the handout.
 
-The Catalog cards show slug, auth mode, dataset/tool/row counts, and clone buttons. Bulk clone uses `prefix`, `count`, and optional `start`. Slugs are zero-padded to the width of `start + count - 1`, minimum width two, so prefix `hr-team`, count `20`, start `1` creates `hr-team01` through `hr-team20`.
+The Catalog cards show slug, auth mode, dataset/tool/row counts, recipe count, and clone buttons. Bulk clone uses `prefix`, `count`, and optional `start`. Slugs are zero-padded to the width of `start + count - 1`, minimum width two, so prefix `hr-team`, count `20`, start `1` creates `hr-team01` through `hr-team20`.
 
-Clone deep-copies the server, datasets, live rows, seed rows, and endpoints with remapped dataset IDs. It does not copy API keys, traffic, or LLM endpoints.
+Clone deep-copies the server, datasets, live rows, seed rows, and endpoints with remapped dataset IDs. It does not copy API keys, traffic, LLM endpoints, or recipes.
 
 | Endpoint | Body | Result |
 |----------|------|--------|
@@ -50,13 +50,30 @@ Set `PUBLIC_BASE_URL` to the URL trainees can actually reach before exporting ha
 | `GET /api/traffic/summary` | `200` per-slug traffic summary with `call_count`, `ok_count`, `error_count`, `avg_duration_ms`, and `last_call_at`. |
 | `POST /api/servers/reset-all-to-seed` | Body is optional. Bodyless resets all servers; `{"prefix": "hr-team"}` resets matching slugs only. |
 
-The admin management MCP server at `/mcp/_admin` exposes 41 tools. The bootcamp tools are `get_cohort`, `get_traffic_summary`, and `reset_all_to_seed`; `reset_all_to_seed` requires `confirm=true` or it returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
+The admin management MCP server at `/mcp/_admin` exposes 47 tools. The bootcamp tools are `get_cohort`, `get_traffic_summary`, and `reset_all_to_seed`; `reset_all_to_seed` requires `confirm=true` or it returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
+
+### Recipe playbooks
+
+Recipes are trainer-authored agent playbooks. They are not cloned by **Bulk clone**: one public recipe assignment applies to all teams, while each team uses its own server URL.
+
+Trainer flow:
+
+1. Open the **Recipes** tab.
+2. Copy the public playbook URL, or open the recipe and download the Markdown handout for offline or printed use.
+3. Give attendees the public playbook URL and their team-specific MCP server URL from the Cohort handout.
+
+Attendee flow:
+
+1. Open the public playbook page.
+2. Copy the `agent_instructions` block straight into the Copilot Studio agent's instructions.
+3. Add the listed MCP tools using the server URL the trainer provided, not the template server URL shown by the recipe.
+4. Test the example prompts from the recipe.
 
 ---
 
 ## Seeded sample servers
 
-First boot creates 5 servers, 15 datasets, 42 endpoints, 12 relationships, and 1 mock LLM endpoint. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
+First boot creates 5 servers, 15 datasets, 42 endpoints, 12 relationships, 1 mock LLM endpoint, and 7 published recipes. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
 
 | Slug | Name | Datasets | Tools | Rows |
 |------|------|----------|-------|------|
@@ -67,6 +84,8 @@ First boot creates 5 servers, 15 datasets, 42 endpoints, 12 relationships, and 1
 | `contoso-expenses` | Contoso Travel Expenses | 4 | 9 | 116 |
 
 Dataset row totals: `contoso-orders` has `orders` 40 / `order_lines` 120; `northwind-hris` has `employees` 30 / `time_off_requests` 28 / `org_units` 6; `fabrikam-it-service` has `tickets` 30 / `assets` 18 / `service_catalog` 8; `adatum-crm` has `accounts` 20 / `contacts` 30 / `opportunities` 26; `contoso-expenses` has `expense_reports` 24 / `expense_lines` 60 / `cost_centres` 8 / `approvals` 24.
+
+The 7 seeded recipes are all published. Two are cross-server, and the set spans 5 servers, 15 datasets, 42 endpoints, and 40 recipe-to-tool links.
 
 ---
 

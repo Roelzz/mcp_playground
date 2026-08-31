@@ -14,6 +14,7 @@ MCP Playground is a browser-managed playground for authoring persistent mock MCP
 | Management MCP server | `/mcp/_admin` | API key, `admin` scope |
 | Plain REST mock | `/mock/{slug}/*` | per-server (open or API key) |
 | OpenAI-compatible chat | `POST /v1/{slug}/chat/completions` | per-endpoint (open or API key) |
+| Public recipe playbooks | `/r/`, `/r/{slug}`, `/api/public/recipes` | open, read-only |
 | Health | `/health` | open |
 
 ## Quick start (local, no container)
@@ -66,11 +67,12 @@ Copy `.env.example` to `.env` and edit values for your environment.
 
 ## Admin UI
 
-The admin UI at `/ui/` has ten pages.
+The admin UI at `/ui/` has eleven tabs.
 
-| Page | What it does |
+| Tab | What it does |
 |---|---|
-| Catalog | Browse every server as cards with slug, auth mode, dataset/tool/row counts; clone one server or bulk-clone team copies. |
+| Catalog | Browse every server as cards with slug, auth mode, dataset/tool/row counts, and recipe count; clone one server or bulk-clone team copies. |
+| Recipes | Manage agent playbooks with instructions, example prompts, toolsets, destinations, and public handouts. |
 | Cohort | Bootcamp control panel for team readiness, handout export, traffic by team, and reset-to-seed. |
 | Servers | Create and edit mock MCP servers; copy the live MCP URL for each. |
 | Datasets | Paste or edit JSON or CSV; inspect the inferred field schema; manage seed snapshots. |
@@ -83,7 +85,7 @@ The admin UI at `/ui/` has ten pages.
 
 ### Catalog and bootcamp cloning
 
-The **Catalog** tab is the first tab in the sidebar. It shows every server in a card grid with slug, auth mode, and metrics for datasets, tools, and rows. From a card, an admin can create one clone or bulk-clone one source server into numbered team servers.
+The **Catalog** tab is the first tab in the sidebar. It shows every server in a card grid with slug, auth mode, metrics for datasets, tools, and rows, and an `N recipes` badge. From a card, an admin can create one clone or bulk-clone one source server into numbered team servers.
 
 This is the bootcamp provisioning path: build one good server, then bulk-clone it once per training team.
 
@@ -97,9 +99,74 @@ Bulk clone is all-or-nothing. If any target slug already exists, it creates noth
 
 Clone deep-copies the server row, datasets, live dataset rows, seed dataset rows, and endpoints with remapped dataset IDs. It does not copy API keys, call log traffic, or LLM endpoints.
 
+Bulk clone deliberately does not clone recipes. A recipe is one assignment that can be used by every team; cloning it once per generated server would create duplicate playbooks that trainers then have to maintain by hand. The public recipe page shows the tools from the template server, and trainers give attendees their team-specific server URL separately.
+
+### Recipes
+
+A recipe is an agent playbook: a scenario-level assignment that tells a bootcamp attendee what agent to build. It contains a title, skill badge, department, summary, example prompts, copy-paste `agent_instructions`, a set of MCP tools, and optional informational destinations such as Outlook or Teams.
+
+Schema version was bumped from **2** to **3** and adds two tables:
+
+| Table | Purpose |
+|---|---|
+| `recipe` | Instance-level playbook metadata: slug, title, skill, department, summary, instructions, prompts, destinations, and published state. |
+| `recipe_tool` | Join table from a recipe to selected endpoint tools, including the source server for each tool. |
+
+Recipes are the deliberate exception to the rest of the schema. Everywhere else `server_id` is a foreign key. A recipe can span tools from multiple servers, so it is an instance-level object, not a child of one server.
+
+The **Recipes** tab sits between Catalog and Cohort. It has a recipe list on the left and an editor on the right for slug, title, department, skill, summary, agent instructions, published state, example prompts, server+tool picker, and destination tags. Actions are **Save**, **Delete**, **Copy public link**, **Open public page**, and **Download handout**.
+
+Admin API under `/api` is session-gated:
+
+| Endpoint | Result |
+|---|---|
+| `GET /api/recipes` | List recipes. |
+| `POST /api/recipes` | Create a recipe. |
+| `GET /api/recipes/{recipe_id}` | Read one recipe. |
+| `PATCH /api/recipes/{recipe_id}` | Update one recipe. |
+| `DELETE /api/recipes/{recipe_id}` | Delete one recipe. |
+| `PUT /api/recipes/{recipe_id}/tools` | Replace the whole toolset in one call. |
+| `GET /api/recipes/validate` | Validation report; never raises. |
+| `GET /api/recipes/departments` | Distinct departments with recipe counts. |
+| `GET /api/recipes/{recipe_id}/handout` | Markdown handout; add `?download=true` to download. |
+
+Public surface:
+
+| Endpoint | Result |
+|---|---|
+| `GET /r/` | Public **Agent Playbook** index with cards filtered by skill and department. |
+| `GET /r/{slug}` | Public recipe detail page. |
+| `GET /api/public/recipes` | JSON used by the public pages. |
+
+This is the first unauthenticated HTML surface in the app. It is read-only: no session, no cookie, no POST, and no mutation. Only `published = 1` recipes are exposed. A draft or unknown slug returns **404**, not 403, so existence is not leaked. The public API never exposes API keys, password hashes, or `call_log`.
+
+First boot seeds 7 published recipes:
+
+| Slug | Title | Skill | Department |
+|---|---|---|---|
+| `order-status-assistant` | Order status assistant | beginner | Sales Operations |
+| `leave-request-handling` | Leave request handling | beginner | Human Resources |
+| `it-ticket-triage` | IT ticket triage | intermediate | IT Operations |
+| `pipeline-review` | Pipeline review | intermediate | Sales Operations |
+| `expense-approval` | Expense approval | intermediate | Finance & Procurement |
+| `expense-manager-lookup` | Expense + manager lookup | advanced | Finance & Procurement (cross-server) |
+| `order-problem-it-ticket` | Order problem → IT ticket | advanced | Operations & Supply Chain (cross-server) |
+
+The seed set spans 5 servers, 15 datasets, 42 endpoints, and 40 recipe-to-tool links.
+
+The management MCP server exposes six recipe tools: `list_recipes`, `get_recipe`, `create_recipe`, `update_recipe`, `delete_recipe`, and `set_recipe_tools`.
+
+### Theme
+
+The UI uses a green brand palette: `--brand: #16a34a` in light mode and `#22c55e` in dark mode. The success colour `--ok` is teal (`#0e7490`) so success callouts stay distinct from the brand colour.
+
+The header has a sun/moon toggle. The selected theme is stored in `localStorage.theme` and applied to `<html data-theme="...">`. If no explicit choice exists, the default follows `prefers-color-scheme`.
+
+An inline script in `<head>` applies the theme before first paint, preventing a white flash on reload. `@media print` forces light tokens so recipe handouts print legibly.
+
 ### Cohort control panel
 
-The **Cohort** tab is the second tab in the sidebar. It is the bootcamp control panel for trainers.
+The **Cohort** tab is the third tab in the sidebar. It is the bootcamp control panel for trainers.
 
 | Panel | What it does |
 |---|---|
@@ -148,7 +215,7 @@ Example: `GET /mock/contoso-orders/order-lines?expand=order` inlines the parent 
 
 ## Seeded sample servers
 
-First boot seeds 5 servers, 15 datasets, 42 endpoints, 12 relationships, and 1 mock LLM endpoint. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
+First boot seeds 5 servers, 15 datasets, 42 endpoints, 12 relationships, 1 mock LLM endpoint, and 7 published recipes. All five seeded servers use `auth_mode='none'`, so they are handout-ready without a key.
 
 | Slug | Name | Datasets | Tools | Rows |
 |---|---|---|---|---|
@@ -159,6 +226,8 @@ First boot seeds 5 servers, 15 datasets, 42 endpoints, 12 relationships, and 1 m
 | `contoso-expenses` | Contoso Travel Expenses | 4 | 9 | 116 |
 
 Dataset row totals: `contoso-orders` has `orders` 40 / `order_lines` 120; `northwind-hris` has `employees` 30 / `time_off_requests` 28 / `org_units` 6; `fabrikam-it-service` has `tickets` 30 / `assets` 18 / `service_catalog` 8; `adatum-crm` has `accounts` 20 / `contacts` 30 / `opportunities` 26; `contoso-expenses` has `expense_reports` 24 / `expense_lines` 60 / `cost_centres` 8 / `approvals` 24.
+
+Seeded recipes span all 5 servers, all 15 datasets, all 42 endpoints, and 40 recipe-to-tool links. Two recipes are cross-server.
 
 ## Calling a server over plain REST
 
@@ -201,11 +270,11 @@ See **[COPILOT-STUDIO.md](COPILOT-STUDIO.md)** for the full runbook covering bot
 
 ## Management MCP server
 
-`/mcp/_admin` is a second FastMCP server that exposes **41 tools** mirroring the admin REST API. It lets an LLM agent drive the entire playground — create servers, clone team servers, load datasets, define endpoints, adjust LLM responses, and inspect traffic — without a human touching the web UI.
+`/mcp/_admin` is a second FastMCP server that exposes **47 tools** mirroring the admin REST API. It lets an LLM agent drive the entire playground — create servers, clone team servers, load datasets, define endpoints, adjust LLM responses, manage recipes, and inspect traffic — without a human touching the web UI.
 
 Authentication: API key with `admin` scope, passed as `X-API-Key: <key>` or `Authorization: Bearer <key>`.
 
-Tools are grouped into seven areas:
+Tools are grouped into eight areas:
 
 | Area | Tools |
 |---|---|
@@ -215,6 +284,7 @@ Tools are grouped into seven areas:
 | Endpoints | `list_endpoints`, `get_endpoint`, `create_endpoint`, `update_endpoint`, `delete_endpoint` |
 | Relationships | `list_relationships`, `create_relationship`, `delete_relationship`, `validate_relationships`, `ensure_demo_relationships` |
 | LLM endpoints | `list_llm_endpoints`, `get_llm_endpoint`, `create_llm_endpoint`, `update_llm_endpoint`, `delete_llm_endpoint`, `set_llm_responses` |
+| Recipes | `list_recipes`, `get_recipe`, `create_recipe`, `update_recipe`, `delete_recipe`, `set_recipe_tools` |
 | Misc | `call_tool`, `get_cohort`, `get_traffic`, `get_traffic_summary`, `clear_traffic` |
 
 `reset_all_to_seed` requires `confirm=true`. Without it, the tool returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
@@ -223,7 +293,7 @@ Tools are grouped into seven areas:
 
 MCP Playground has three data tiers.
 
-Definitions are the authored servers, endpoints, and datasets. They persist forever until an admin changes them.
+Definitions are the authored servers, endpoints, datasets, relationships, and recipes. They persist forever until an admin changes them.
 
 Live data is the mutable runtime state used during a demo. It persists across restarts and is mutated by agent calls. If an agent creates an order during a demo, that order is still there tomorrow.
 
