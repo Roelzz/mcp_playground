@@ -22,6 +22,12 @@ EXPECTED_TOOL_NAMES = {
     "update_server",
     "delete_server",
     "get_connection_info",
+    "list_api_keys",
+    "create_api_key",
+    "delete_api_key",
+    "export_swagger",
+    "export_server",
+    "import_server",
     "list_datasets",
     "get_dataset",
     "create_dataset",
@@ -50,6 +56,9 @@ EXPECTED_TOOL_NAMES = {
     "update_recipe",
     "delete_recipe",
     "set_recipe_tools",
+    "validate_recipes",
+    "list_recipe_departments",
+    "get_recipe_handout",
     "call_tool",
     "get_traffic",
     "get_traffic_summary",
@@ -58,6 +67,7 @@ EXPECTED_TOOL_NAMES = {
     "create_relationship",
     "delete_relationship",
     "validate_relationships",
+    "list_expands",
     "ensure_demo_relationships",
 }
 
@@ -69,13 +79,13 @@ ALLOWED_GAPS = {
     # Relationship helpers used internally by API and Phase 4; not exposed as separate admin tools.
     "get_relationship",
     "parse_expand",
-    "available_expands",
     "expand_rows",
-    # Recipe helpers that mirror slug lookup, validation, and aggregate API helpers.
-    "get_recipe_by_slug",
-    "validate_recipes",
-    "recipe_counts_by_server",
+    # Exposed through LLM-facing admin aliases: list_expands and list_recipe_departments.
+    "available_expands",
     "recipe_departments",
+    # Recipe helpers that mirror slug lookup and aggregate API helpers.
+    "get_recipe_by_slug",
+    "recipe_counts_by_server",
 }
 
 
@@ -126,6 +136,7 @@ def test_build_admin_server_registers_expected_tools(conn: sqlite3.Connection) -
     server = admin_mcp.build_admin_server(conn)
     assert isinstance(server, FastMCP)
     assert set(_tools(conn)) == EXPECTED_TOOL_NAMES
+    assert len(_tools(conn)) == 57
 
 
 def test_every_tool_has_description_and_parameters(conn: sqlite3.Connection) -> None:
@@ -164,6 +175,68 @@ def test_get_connection_info_uses_public_base_url(
     assert info["mcp_url"] == "https://playground.example/mcp/connect-me"
     assert info["tool_count"] == 1
     assert info["tools"][0]["name"] == "get_order"
+
+
+def test_api_key_tools_create_list_and_never_expose_key_hash(
+    conn: sqlite3.Connection,
+) -> None:
+    tools = _tools(conn)
+
+    created = tools["create_api_key"].fn(label="Agent admin", scope="admin")
+    keys = tools["list_api_keys"].fn()
+
+    assert created["key"]
+    assert created["label"] == "Agent admin"
+    assert created["scope"] == "admin"
+    assert "key_hash" not in created
+    assert "key" not in keys[0]
+    assert "key_hash" not in keys[0]
+    assert keys[0]["id"] == created["id"]
+
+
+def test_delete_api_key_requires_confirmation_and_revokes(
+    conn: sqlite3.Connection,
+) -> None:
+    tools = _tools(conn)
+    created = tools["create_api_key"].fn(label="Delete me", scope="readonly")
+
+    _assert_confirm_refused(tools["delete_api_key"].fn(key_id=created["id"]))
+    assert tools["list_api_keys"].fn()[0]["id"] == created["id"]
+
+    deleted = tools["delete_api_key"].fn(key_id=created["id"], confirm=True)
+
+    assert deleted == {"ok": True, "deleted": True, "key_id": created["id"]}
+    assert tools["list_api_keys"].fn() == []
+
+
+def test_export_swagger_uses_default_base_url(conn: sqlite3.Connection) -> None:
+    tools = _tools(conn)
+    server = _create_server(tools, "swagger")
+    dataset = _create_dataset(tools, int(server["id"]), rows=[{"id": 1, "name": "A"}])
+    _create_get_endpoint(tools, int(server["id"]), int(dataset["id"]))
+
+    swagger = tools["export_swagger"].fn(server_id=server["id"])
+
+    assert swagger["swagger"] == "2.0"
+    assert swagger["host"] == "localhost:2009"
+    assert swagger["basePath"] == "/mock/swagger"
+    assert "/orders/{id}" in swagger["paths"]
+
+
+def test_export_and_import_server_round_trips_bundle(conn: sqlite3.Connection) -> None:
+    tools = _tools(conn)
+    server = _create_server(tools, "portable")
+    dataset = _create_dataset(tools, int(server["id"]), rows=[{"id": 1, "name": "A"}])
+    _create_get_endpoint(tools, int(server["id"]), int(dataset["id"]))
+
+    bundle = tools["export_server"].fn(server_id=server["id"])
+    imported = tools["import_server"].fn(bundle=bundle, slug="portable-copy")
+
+    assert bundle["format"] == "mcp-playground-server"
+    assert imported["server"]["slug"] == "portable-copy"
+    assert imported["datasets"] == 1
+    assert imported["endpoints"] == 1
+    assert tools["get_server"].fn(server_id=imported["server"]["id"])["slug"] == "portable-copy"
 
 
 def test_not_found_returns_structured_error(conn: sqlite3.Connection) -> None:
@@ -288,6 +361,67 @@ def test_recipe_tools_manage_recipe_lifecycle(conn: sqlite3.Connection) -> None:
     deleted = tools["delete_recipe"].fn(recipe_id=recipe["id"], confirm=True)
     assert deleted == {"ok": True, "deleted": True, "recipe_id": recipe["id"]}
     assert tools["get_recipe"].fn(recipe_id=recipe["id"])["code"] == "not_found"
+
+
+def test_recipe_validation_departments_and_handout_tools(
+    conn: sqlite3.Connection,
+) -> None:
+    tools = _tools(conn)
+    server = _create_server(tools, "recipe-report")
+    dataset = _create_dataset(tools, int(server["id"]), rows=[{"id": 1}])
+    _create_get_endpoint(tools, int(server["id"]), int(dataset["id"]), "list_orders")
+    recipe = tools["create_recipe"].fn(
+        slug="sales-handout",
+        title="Sales handout",
+        department="Sales",
+        agent_instructions="Use the order tools.",
+        example_prompts=["Show orders"],
+        tools=[{"server_id": int(server["id"]), "tool_name": "list_orders"}],
+    )
+
+    validation = tools["validate_recipes"].fn()
+    departments = tools["list_recipe_departments"].fn()
+    handout = tools["get_recipe_handout"].fn(recipe_id=recipe["id"])
+
+    assert validation["ok"] is True
+    assert validation["recipe_count"] == 1
+    assert departments == [{"department": "Sales", "count": 1}]
+    assert handout["slug"] == "sales-handout"
+    assert "# Sales handout" in handout["markdown"]
+    assert "`list_orders`" in handout["markdown"]
+
+
+def test_list_expands_returns_dataset_relationship_options(
+    conn: sqlite3.Connection,
+) -> None:
+    tools = _tools(conn)
+    server = _create_server(tools, "expands")
+    orders = _create_dataset(tools, int(server["id"]), "orders", rows=[{"id": 1}])
+    lines = _create_dataset(
+        tools,
+        int(server["id"]),
+        "lines",
+        rows=[{"id": 10, "order_id": 1}],
+    )
+    relationship = tools["create_relationship"].fn(
+        server_id=server["id"],
+        name="line_order",
+        source_dataset_id=lines["id"],
+        source_field="order_id",
+        target_dataset_id=orders["id"],
+        target_field="id",
+        expand_name="order",
+        inverse_expand_name="lines",
+    )
+
+    line_expands = tools["list_expands"].fn(dataset_id=lines["id"])
+    order_expands = tools["list_expands"].fn(dataset_id=orders["id"])
+
+    assert line_expands[0]["relationship_id"] == relationship["id"]
+    assert line_expands[0]["name"] == "order"
+    assert line_expands[0]["direction"] == "forward"
+    assert order_expands[0]["name"] == "lines"
+    assert order_expands[0]["direction"] == "inverse"
 
 
 def test_service_functions_have_admin_tools() -> None:

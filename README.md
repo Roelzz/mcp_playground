@@ -154,7 +154,7 @@ First boot seeds 7 published recipes:
 
 The seed set spans 5 servers, 15 datasets, 42 endpoints, and 40 recipe-to-tool links.
 
-The management MCP server exposes six recipe tools: `list_recipes`, `get_recipe`, `create_recipe`, `update_recipe`, `delete_recipe`, and `set_recipe_tools`.
+The management MCP server exposes nine recipe tools: `list_recipes`, `get_recipe`, `create_recipe`, `update_recipe`, `delete_recipe`, `set_recipe_tools`, `validate_recipes`, `list_recipe_departments`, and `get_recipe_handout`.
 
 ### Theme
 
@@ -209,7 +209,7 @@ Rules:
 | `POST /api/relationships/ensure-demo` | `{"server_id": N}` optional | `200` `{"servers_touched", "relationships_created", "skipped_existing"}`. Idempotent. |
 | `GET /api/datasets/{dataset_id}/expands` | none | `200` list of available expand names with `direction`, `returns`, and the target dataset. |
 
-`relation_type` is `many_to_one` or `one_to_one`. Self-references are allowed. The same five operations are exposed as management MCP tools.
+`relation_type` is `many_to_one` or `one_to_one`. Self-references are allowed. The same six operations are exposed as management MCP tools.
 
 Example: `GET /mock/contoso-orders/order-lines?expand=order` inlines the parent order into every line. `GET /mock/contoso-orders/orders/1001?expand=lines` inlines the line array into the order.
 
@@ -270,24 +270,33 @@ See **[COPILOT-STUDIO.md](COPILOT-STUDIO.md)** for the full runbook covering bot
 
 ## Management MCP server
 
-`/mcp/_admin` is a second FastMCP server that exposes **47 tools** mirroring the admin REST API. It lets an LLM agent drive the entire playground — create servers, clone team servers, load datasets, define endpoints, adjust LLM responses, manage recipes, and inspect traffic — without a human touching the web UI.
+`/mcp/_admin` is a second FastMCP server that exposes **57 tools** mirroring the admin REST API. It lets an LLM agent drive the entire playground — create servers, clone team servers, load datasets, define endpoints, adjust LLM responses, manage recipes, and inspect traffic — without a human touching the web UI.
 
 Authentication: API key with `admin` scope, passed as `X-API-Key: <key>` or `Authorization: Bearer <key>`.
 
-Tools are grouped into eight areas:
+Everything the browser UI can do is also available as an MCP tool, with exactly three intentional exceptions: `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/me`. Those are browser-session-cookie endpoints and are meaningless over MCP, which has its own API key auth. `tests/test_mcp_parity.py` enforces this parity automatically so it cannot silently drift.
+
+Tools are grouped into nine areas:
 
 | Area | Tools |
 |---|---|
-| Servers | `list_servers`, `get_server`, `create_server`, `clone_server`, `bulk_clone_server`, `get_catalog`, `update_server`, `delete_server`, `get_connection_info` |
+| Servers | `list_servers`, `get_server`, `create_server`, `clone_server`, `bulk_clone_server`, `get_catalog`, `update_server`, `delete_server`, `get_connection_info`, `export_swagger`, `export_server`, `import_server` |
 | Datasets | `list_datasets`, `get_dataset`, `create_dataset`, `update_dataset`, `delete_dataset` |
 | Dataset rows | `list_rows`, `replace_rows`, `add_rows`, `reset_to_seed`, `reset_all_to_seed`, `save_as_seed` |
 | Endpoints | `list_endpoints`, `get_endpoint`, `create_endpoint`, `update_endpoint`, `delete_endpoint` |
-| Relationships | `list_relationships`, `create_relationship`, `delete_relationship`, `validate_relationships`, `ensure_demo_relationships` |
+| Relationships | `list_relationships`, `create_relationship`, `delete_relationship`, `validate_relationships`, `ensure_demo_relationships`, `list_expands` |
 | LLM endpoints | `list_llm_endpoints`, `get_llm_endpoint`, `create_llm_endpoint`, `update_llm_endpoint`, `delete_llm_endpoint`, `set_llm_responses` |
-| Recipes | `list_recipes`, `get_recipe`, `create_recipe`, `update_recipe`, `delete_recipe`, `set_recipe_tools` |
+| Recipes | `list_recipes`, `get_recipe`, `create_recipe`, `update_recipe`, `delete_recipe`, `set_recipe_tools`, `validate_recipes`, `list_recipe_departments`, `get_recipe_handout` |
+| API keys | `list_api_keys`, `create_api_key`, `delete_api_key` |
 | Misc | `call_tool`, `get_cohort`, `get_traffic`, `get_traffic_summary`, `clear_traffic` |
 
 `reset_all_to_seed` requires `confirm=true`. Without it, the tool returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
+
+`list_api_keys` returns key metadata only and never exposes a secret hash. `create_api_key` returns the plaintext key exactly once; copy it immediately because it cannot be retrieved again. `delete_api_key` is destructive and requires `confirm=true`.
+
+`export_swagger` returns the server's Swagger/OpenAPI spec and accepts an optional `base_url` override. `export_server` returns a portable JSON bundle for one server. `import_server` imports that bundle and can override the imported slug.
+
+`validate_recipes` reports recipe issues, `list_recipe_departments` returns department counts, `get_recipe_handout` renders one recipe as Markdown, and `list_expands` lists the available `$expand` paths for a dataset.
 
 ## Data & persistence
 

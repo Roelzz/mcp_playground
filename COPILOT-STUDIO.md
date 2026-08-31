@@ -50,7 +50,22 @@ Set `PUBLIC_BASE_URL` to the URL trainees can actually reach before exporting ha
 | `GET /api/traffic/summary` | `200` per-slug traffic summary with `call_count`, `ok_count`, `error_count`, `avg_duration_ms`, and `last_call_at`. |
 | `POST /api/servers/reset-all-to-seed` | Body is optional. Bodyless resets all servers; `{"prefix": "hr-team"}` resets matching slugs only. |
 
-The admin management MCP server at `/mcp/_admin` exposes 47 tools. The bootcamp tools are `get_cohort`, `get_traffic_summary`, and `reset_all_to_seed`; `reset_all_to_seed` requires `confirm=true` or it returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
+The admin management MCP server at `/mcp/_admin` exposes 57 tools. Everything the browser UI can do is also available as an MCP tool, with exactly three intentional exceptions: `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/me`. Those are browser-session-cookie endpoints and are meaningless over MCP, which has its own API key auth. `tests/test_mcp_parity.py` enforces this parity automatically so it cannot silently drift.
+
+The bootcamp tools are `get_cohort`, `get_traffic_summary`, and `reset_all_to_seed`; `reset_all_to_seed` requires `confirm=true` or it returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
+
+| Tool | What it does |
+|------|--------------|
+| `list_api_keys` | List active API keys; returns metadata only and never exposes secret hashes. |
+| `create_api_key` | Create an API key; returns the plaintext key exactly once, so copy it immediately. |
+| `delete_api_key` | Revoke an active API key. Destructive; requires `confirm=true`. |
+| `export_swagger` | Export a server's Swagger/OpenAPI spec, with an optional `base_url` override. |
+| `export_server` | Export one mock MCP server as a portable JSON bundle. |
+| `import_server` | Import a portable server bundle, optionally under a replacement slug. |
+| `validate_recipes` | Validate all recipes and return a health report. |
+| `list_recipe_departments` | List recipe departments with recipe counts. |
+| `get_recipe_handout` | Render one recipe handout as Markdown. |
+| `list_expands` | List available `$expand` relationship paths for a dataset. |
 
 ### Recipe playbooks
 

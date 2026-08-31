@@ -12,6 +12,8 @@ from loguru import logger
 from mcp.server import FastMCP
 from pydantic import Field
 
+import auth
+import portability
 import service
 
 REQUIRED = inspect.Parameter.empty
@@ -21,8 +23,9 @@ Handler = Callable[..., Any]
 
 ADMIN_INSTRUCTIONS = (
     "This MCP server manages MCP Playground itself. Use these tools to create and edit "
-    "mock MCP servers, datasets, endpoint tools, OpenAI-compatible LLM endpoints, and "
-    "traffic logs for Microsoft Copilot Studio demos."
+    "mock MCP servers, datasets, endpoint tools, recipes, API keys, import/export "
+    "bundles, OpenAI-compatible LLM endpoints, and traffic logs for Microsoft Copilot "
+    "Studio demos."
 )
 
 CONFIRM_ERROR = "set confirm=true to proceed"
@@ -198,6 +201,49 @@ def _get_connection_info(conn: sqlite3.Connection, slug: str) -> Any:
             "If auth_mode is api_key, the host app must provide the required API key.",
         ],
     }
+
+
+def _list_api_keys(conn: sqlite3.Connection) -> Any:
+    keys = _call_service(auth.list_api_keys, conn)
+    if _is_error(keys):
+        return keys
+    return [{k: v for k, v in key.items() if k != "key_hash"} for key in keys]
+
+
+def _create_api_key(
+    conn: sqlite3.Connection, label: str, scope: str = "admin"
+) -> Any:
+    return _call_service(auth.create_api_key, conn, label, scope)
+
+
+def _delete_api_key(
+    conn: sqlite3.Connection, key_id: int, confirm: bool = False
+) -> dict[str, Any]:
+    if not confirm:
+        return _confirm_required(f"API key {key_id}")
+    revoked = _call_service(auth.revoke_api_key, conn, key_id)
+    if _is_error(revoked):
+        return revoked
+    if not revoked:
+        return _error("not_found", f"API key {key_id} not found")
+    return _ok(deleted=True, key_id=key_id)
+
+
+def _export_swagger(
+    conn: sqlite3.Connection, server_id: int, base_url: str | None = None
+) -> Any:
+    resolved_base_url = base_url or os.getenv("PUBLIC_BASE_URL") or "http://localhost:2009"
+    return _call_service(portability.build_swagger, conn, server_id, resolved_base_url)
+
+
+def _export_server(conn: sqlite3.Connection, server_id: int) -> Any:
+    return _call_service(portability.build_bundle, conn, server_id)
+
+
+def _import_server(
+    conn: sqlite3.Connection, bundle: dict[str, Any], slug: str | None = None
+) -> Any:
+    return _call_service(portability.import_bundle, conn, bundle, slug)
 
 
 def _list_datasets(conn: sqlite3.Connection, server_id: int) -> Any:
@@ -436,6 +482,22 @@ def _set_recipe_tools(
     return _call_service(service.set_recipe_tools, conn, recipe_id, tools)
 
 
+def _validate_recipes(conn: sqlite3.Connection) -> Any:
+    return _call_service(service.validate_recipes, conn)
+
+
+def _list_recipe_departments(conn: sqlite3.Connection) -> Any:
+    return _call_service(service.recipe_departments, conn)
+
+
+def _get_recipe_handout(conn: sqlite3.Connection, recipe_id: int) -> Any:
+    result = _call_service(service._build_recipe_handout, conn, recipe_id)
+    if _is_error(result):
+        return result
+    slug, markdown = result
+    return {"slug": slug, "markdown": markdown}
+
+
 def _call_tool(
     conn: sqlite3.Connection,
     slug: str,
@@ -506,6 +568,10 @@ def _delete_relationship(conn: sqlite3.Connection, relationship_id: int) -> Any:
 
 def _validate_relationships(conn: sqlite3.Connection, server_id: int) -> Any:
     return _call_service(service.validate_relationships, conn, server_id)
+
+
+def _list_expands(conn: sqlite3.Connection, dataset_id: int) -> Any:
+    return _call_service(service.available_expands, conn, dataset_id)
 
 
 def _ensure_demo_relationships(conn: sqlite3.Connection, server_id: int | None = None) -> Any:
@@ -580,6 +646,62 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
         "Get paste-ready Copilot Studio MCP connection details for a server slug.",
         [_param("slug", str, "Server slug.")],
         _get_connection_info,
+    ),
+    (
+        "list_api_keys",
+        "List active admin API keys. Returns key metadata only and never secret hashes.",
+        [],
+        _list_api_keys,
+    ),
+    (
+        "create_api_key",
+        (
+            "Create an admin API key. Returns the plaintext key exactly once; copy it "
+            "immediately because later list calls only return metadata."
+        ),
+        [
+            _param("label", str, "Human-readable label for the API key."),
+            _param("scope", str, "Key scope: admin or readonly.", "admin"),
+        ],
+        _create_api_key,
+    ),
+    (
+        "delete_api_key",
+        "Revoke an active API key when confirmed. Destructive; the key stops working.",
+        [
+            _param("key_id", int, "API key ID."),
+            _param("confirm", bool, "Set true to revoke the API key.", False),
+        ],
+        _delete_api_key,
+    ),
+    (
+        "export_swagger",
+        "Export a server as a Swagger 2.0 custom connector document.",
+        [
+            _param("server_id", int, "Server ID."),
+            _param(
+                "base_url",
+                str | None,
+                "Public base URL for generated paths; defaults to PUBLIC_BASE_URL.",
+                None,
+            ),
+        ],
+        _export_swagger,
+    ),
+    (
+        "export_server",
+        "Export one mock MCP server as a portable JSON bundle with datasets and tools.",
+        [_param("server_id", int, "Server ID.")],
+        _export_server,
+    ),
+    (
+        "import_server",
+        "Import a portable server bundle and optionally override the imported slug.",
+        [
+            _param("bundle", dict[str, Any], "Portable server bundle to import."),
+            _param("slug", str | None, "Optional replacement slug for the imported server.", None),
+        ],
+        _import_server,
     ),
     (
         "list_datasets",
@@ -850,6 +972,24 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
         _set_recipe_tools,
     ),
     (
+        "validate_recipes",
+        "Validate recipe tool references and return a health report; never raises.",
+        [],
+        _validate_recipes,
+    ),
+    (
+        "list_recipe_departments",
+        "List recipe departments with recipe counts for filtering recipe handouts.",
+        [],
+        _list_recipe_departments,
+    ),
+    (
+        "get_recipe_handout",
+        "Render one recipe handout as markdown and return its slug plus markdown.",
+        [_param("recipe_id", int, "Recipe ID.")],
+        _get_recipe_handout,
+    ),
+    (
         "call_tool",
         "Call one endpoint tool on a mock MCP server.",
         [
@@ -925,6 +1065,12 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
         "Validate all dataset relationships for a server and return a health report.",
         [_param("server_id", int, "Server ID.")],
         _validate_relationships,
+    ),
+    (
+        "list_expands",
+        "List available relationship expand names for a dataset, including direction.",
+        [_param("dataset_id", int, "Dataset ID.")],
+        _list_expands,
     ),
     (
         "ensure_demo_relationships",

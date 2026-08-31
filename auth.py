@@ -14,6 +14,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 import db
+import service
 
 SESSION_COOKIE = "pg_session"
 SCRYPT_N = 16384
@@ -328,10 +329,8 @@ def me(principal: Principal = AdminDep) -> dict[str, str]:
     return {"username": principal.label, "scope": principal.scope}
 
 
-@router.get("/keys")
-def list_keys(
-    conn: sqlite3.Connection = ConnDep, _: Principal = AdminDep
-) -> list[dict[str, Any]]:
+def list_api_keys(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """List active API keys without secret material."""
     rows = conn.execute(
         """
         SELECT id, label, scope, created_at, last_used_at
@@ -343,27 +342,65 @@ def list_keys(
     return [dict(row) for row in rows]
 
 
-@router.post("/keys", status_code=201)
-def create_key(
-    body: KeyCreateRequest,
-    conn: sqlite3.Connection = ConnDep,
-    _: Principal = WriteDep,
+def create_api_key(
+    conn: sqlite3.Connection, label: str, scope: str = "admin"
 ) -> dict[str, Any]:
+    """Create an API key and return its metadata plus plaintext key once."""
+    clean_label = label.strip()
+    if not clean_label:
+        raise service.ServiceError("label must not be empty")
+    if scope not in ("admin", "readonly"):
+        raise service.ServiceError("scope must be 'admin' or 'readonly'")
+
     key = generate_api_key()
     with db.transaction(conn):
         cursor = conn.execute(
             "INSERT INTO api_key (label, key_hash, scope) VALUES (?, ?, ?)",
-            (body.label, hash_api_key(key), body.scope),
+            (clean_label, hash_api_key(key), scope),
         )
         key_id = int(cursor.lastrowid)
         row = conn.execute(
             "SELECT id, label, scope, created_at FROM api_key WHERE id = ?",
             (key_id,),
         ).fetchone()
-    logger.info(f"created API key {body.label!r} (id={key_id}, scope={body.scope})")
+    logger.info(f"created API key {clean_label!r} (id={key_id}, scope={scope})")
     payload = dict(row)
     payload["key"] = key
     return payload
+
+
+def revoke_api_key(conn: sqlite3.Connection, key_id: int) -> bool:
+    """Revoke an active API key, returning whether a live key was revoked."""
+    row = conn.execute(
+        "SELECT label FROM api_key WHERE id = ? AND revoked_at IS NULL",
+        (key_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    with db.transaction(conn):
+        conn.execute(
+            "UPDATE api_key SET revoked_at = datetime('now') WHERE id = ?",
+            (key_id,),
+        )
+    logger.info(f"revoked API key {row['label']!r} (id={key_id})")
+    return True
+
+
+@router.get("/keys")
+def list_keys(
+    conn: sqlite3.Connection = ConnDep, _: Principal = AdminDep
+) -> list[dict[str, Any]]:
+    return list_api_keys(conn)
+
+
+@router.post("/keys", status_code=201)
+def create_key(
+    body: KeyCreateRequest,
+    conn: sqlite3.Connection = ConnDep,
+    _: Principal = WriteDep,
+) -> dict[str, Any]:
+    return create_api_key(conn, body.label, body.scope)
 
 
 @router.delete("/keys/{key_id}", status_code=204)
@@ -372,16 +409,4 @@ def revoke_key(
     conn: sqlite3.Connection = ConnDep,
     _: Principal = WriteDep,
 ) -> None:
-    row = conn.execute(
-        "SELECT label FROM api_key WHERE id = ? AND revoked_at IS NULL",
-        (key_id,),
-    ).fetchone()
-    if row is None:
-        return
-
-    with db.transaction(conn):
-        conn.execute(
-            "UPDATE api_key SET revoked_at = datetime('now') WHERE id = ?",
-            (key_id,),
-        )
-    logger.info(f"revoked API key {row['label']!r} (id={key_id})")
+    revoke_api_key(conn, key_id)
