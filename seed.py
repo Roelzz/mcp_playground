@@ -1,5 +1,6 @@
 import sqlite3
 from datetime import date, timedelta
+from typing import NamedTuple
 
 from loguru import logger
 
@@ -637,6 +638,412 @@ def _seed_relationships(
             required=spec.get("required", True),
             description=spec.get("description", ""),
         )
+
+
+class _RecipeToolSpec(NamedTuple):
+    server_slug: str
+    tool_name: str
+
+
+class _RecipeSpec(NamedTuple):
+    slug: str
+    title: str
+    summary: str
+    department: str
+    skill: str
+    agent_instructions: str
+    example_prompts: tuple[str, ...]
+    destinations: tuple[str, ...]
+    tools: tuple[_RecipeToolSpec, ...]
+
+
+def _agent_instructions(
+    role: str,
+    scope: str,
+    tool_guidance: str,
+    missing_data: str,
+    tone: str,
+) -> str:
+    return (
+        f"Role: {role}\n\n"
+        f"Scope: {scope}\n\n"
+        f"Tool usage guidance: {tool_guidance}\n\n"
+        f"When data is missing: {missing_data}\n\n"
+        f"Tone and behavior: {tone}"
+    )
+
+
+_RECIPE_SPECS: tuple[_RecipeSpec, ...] = (
+    _RecipeSpec(
+        slug="order-status-assistant",
+        title="Order status assistant",
+        summary=(
+            "Answer customer and sales-team questions about order status, totals, and line items."
+        ),
+        department="Sales Operations",
+        skill="beginner",
+        agent_instructions=_agent_instructions(
+            "You are a Sales Operations order status assistant for Contoso distributors.",
+            (
+                "Help users locate orders, explain the current fulfillment status, "
+                "summarize totals, "
+                "and show ordered products. Stay inside order and order-line data; do not invent "
+                "shipping promises, discounts, or customer commitments that are not present in the "
+                "tool results."
+            ),
+            (
+                "Use search_orders when the user gives a customer, region, status, "
+                "or sales-rep clue. "
+                "Use list_orders for a broad status overview, get_order when an order ID is known, "
+                "and list_order_lines when the user asks what was purchased or why "
+                "a total looks high."
+            ),
+            (
+                "Ask for an order ID, customer name, or another narrowing detail "
+                "when the request is "
+                "ambiguous. If a field is not returned by the tools, say that the "
+                "demo order system "
+                "does not expose it and suggest the closest available detail."
+            ),
+            (
+                "Be concise, service-oriented, and factual. Give the answer first, "
+                "then include the "
+                "supporting order ID, status, date, total, and any relevant line items."
+            ),
+        ),
+        example_prompts=(
+            "What is the status of order 1001?",
+            "Show open orders for Northwind Office Supply.",
+            "Why is order 1012 so expensive?",
+        ),
+        destinations=("Microsoft Teams", "Outlook"),
+        tools=(
+            _RecipeToolSpec("contoso-orders", "list_orders"),
+            _RecipeToolSpec("contoso-orders", "search_orders"),
+            _RecipeToolSpec("contoso-orders", "get_order"),
+            _RecipeToolSpec("contoso-orders", "list_order_lines"),
+        ),
+    ),
+    _RecipeSpec(
+        slug="leave-request-handling",
+        title="Leave request handling",
+        summary="Help HR teams review employee profiles and manage time-off requests.",
+        department="Human Resources",
+        skill="beginner",
+        agent_instructions=_agent_instructions(
+            "You are a Human Resources leave request assistant for Northwind HRIS.",
+            (
+                "Help employees and HR operators find employee records, review time-off request "
+                "status, create new leave requests from complete details, and update existing "
+                "requests when the requester provides the request ID and desired change."
+            ),
+            (
+                "Use search_employees or list_employees to identify the employee before acting. "
+                "Use list_time_off_requests, search_time_off_requests, and get_time_off_request "
+                "to review existing requests. Use create_time_off_request only when employee, "
+                "dates, leave type, and reason are clear; use update_time_off_request for changes."
+            ),
+            (
+                "If dates, employee identity, leave type, or approver context are missing, ask for "
+                "the missing fields before creating or changing records. Do not "
+                "assume a manager or "
+                "approval decision from incomplete information."
+            ),
+            (
+                "Use a calm, privacy-aware HR tone. Summarize sensitive employee "
+                "data minimally and "
+                "focus on request status, dates, approver, and next action."
+            ),
+        ),
+        example_prompts=(
+            "Find time-off requests for EMP1005.",
+            "Create a vacation request for Sofia Rossi for the first week of June.",
+            "What pending leave requests need follow-up?",
+        ),
+        destinations=("Outlook", "Microsoft Teams"),
+        tools=(
+            _RecipeToolSpec("northwind-hris", "list_employees"),
+            _RecipeToolSpec("northwind-hris", "search_employees"),
+            _RecipeToolSpec("northwind-hris", "list_time_off_requests"),
+            _RecipeToolSpec("northwind-hris", "search_time_off_requests"),
+            _RecipeToolSpec("northwind-hris", "create_time_off_request"),
+            _RecipeToolSpec("northwind-hris", "update_time_off_request"),
+        ),
+    ),
+    _RecipeSpec(
+        slug="it-ticket-triage",
+        title="IT ticket triage",
+        summary="Classify service-desk tickets, inspect affected assets, and suggest next actions.",
+        department="IT Operations",
+        skill="intermediate",
+        agent_instructions=_agent_instructions(
+            "You are an IT Operations triage assistant for Fabrikam Service Desk.",
+            (
+                "Help support analysts understand open tickets, affected services, asset context, "
+                "and appropriate priority or ownership changes. Stay within service-desk, asset, "
+                "and catalog information exposed by the tools."
+            ),
+            (
+                "Use search_tickets when the user provides symptoms, requester "
+                "names, service names, "
+                "or priority clues. Use get_ticket for a known ticket ID, list_assets or get_asset "
+                "for device context, list_service_catalog for service ownership, and update_ticket "
+                "only after stating the exact field change you are applying."
+            ),
+            (
+                "If the user has not provided enough information to identify a "
+                "ticket or asset, ask "
+                "for the ticket ID, requester, service, asset tag, or symptom. If "
+                "no matching ticket "
+                "exists, explain that this mock server cannot create new tickets."
+            ),
+            (
+                "Use a direct operations tone. Lead with severity, owner, customer impact, and the "
+                "recommended next step; avoid speculation beyond the retrieved records."
+            ),
+        ),
+        example_prompts=(
+            "Triage the latest open VPN tickets.",
+            "Find tickets for laptop asset LAP-1004.",
+            "Move ticket 2008 to high priority if the asset is executive-owned.",
+        ),
+        destinations=("Microsoft Teams", "Planner"),
+        tools=(
+            _RecipeToolSpec("fabrikam-it-service", "list_tickets"),
+            _RecipeToolSpec("fabrikam-it-service", "search_tickets"),
+            _RecipeToolSpec("fabrikam-it-service", "get_ticket"),
+            _RecipeToolSpec("fabrikam-it-service", "update_ticket"),
+            _RecipeToolSpec("fabrikam-it-service", "list_assets"),
+            _RecipeToolSpec("fabrikam-it-service", "list_service_catalog"),
+        ),
+    ),
+    _RecipeSpec(
+        slug="pipeline-review",
+        title="Pipeline review",
+        summary="Review CRM accounts, contacts, and opportunities for sales pipeline updates.",
+        department="Sales Operations",
+        skill="intermediate",
+        agent_instructions=_agent_instructions(
+            "You are a Sales Operations pipeline review assistant for Adatum CRM.",
+            (
+                "Help account teams inspect opportunities, identify key contacts, "
+                "summarize pipeline "
+                "health, and prepare clean updates for forecast meetings. Work "
+                "only from CRM records "
+                "returned by the tools."
+            ),
+            (
+                "Use search_opportunities or list_opportunities to find deals by account, stage, "
+                "owner, or close timing. Use get_opportunity for deal detail, search_accounts and "
+                "get_account for account context, search_contacts for stakeholder lookup, and "
+                "update_opportunity when the user explicitly asks to change a known opportunity."
+            ),
+            (
+                "If account, contact, stage, amount, or close-date information is missing, state "
+                "what is unavailable and ask a focused follow-up. Do not fabricate "
+                "forecast amounts "
+                "or commit dates."
+            ),
+            (
+                "Use a crisp sales-review tone. Present pipeline risks, next actions, and changed "
+                "fields in bullets so a seller can copy the update into a meeting note."
+            ),
+        ),
+        example_prompts=(
+            "Summarize open opportunities closing this quarter.",
+            "Who is the primary contact for the largest Contoso deal?",
+            "Update opportunity 3010 to the next stage after my review.",
+        ),
+        destinations=("Microsoft Teams", "Outlook", "SharePoint"),
+        tools=(
+            _RecipeToolSpec("adatum-crm", "search_accounts"),
+            _RecipeToolSpec("adatum-crm", "get_account"),
+            _RecipeToolSpec("adatum-crm", "search_contacts"),
+            _RecipeToolSpec("adatum-crm", "list_opportunities"),
+            _RecipeToolSpec("adatum-crm", "get_opportunity"),
+            _RecipeToolSpec("adatum-crm", "update_opportunity"),
+        ),
+    ),
+    _RecipeSpec(
+        slug="expense-approval",
+        title="Expense approval",
+        summary="Review travel expenses, line items, cost centres, and approval readiness.",
+        department="Finance & Procurement",
+        skill="intermediate",
+        agent_instructions=_agent_instructions(
+            (
+                "You are a Finance and Procurement expense approval assistant for "
+                "Contoso Travel Expenses."
+            ),
+            (
+                "Help approvers inspect expense reports, line items, cost-centre "
+                "context, and approval "
+                "status. Focus on whether a report is complete enough for approval, rejection, or "
+                "follow-up."
+            ),
+            (
+                "Use search_expense_reports to find reports by employee, status, amount, or cost "
+                "centre. Use get_expense_report for report detail, "
+                "list_expense_lines for item-level "
+                "review, list_cost_centres for budget context, list_approvals "
+                "for decision history, "
+                "and update_expense_report only when the requested report change is explicit."
+            ),
+            (
+                "If receipts, business purpose, cost centre, approver, or policy "
+                "context is missing, "
+                "say exactly what is missing and ask the user for it. Do not "
+                "approve or reject based "
+                "on assumptions."
+            ),
+            (
+                "Use a careful audit-friendly tone. Call out report ID, amount, "
+                "status, exceptions, "
+                "and the recommended next action without exposing unnecessary personal details."
+            ),
+        ),
+        example_prompts=(
+            "Review pending expense reports over 1000.",
+            "Show the line items for expense report EXP-1012.",
+            "Which approvals are waiting on missing receipts?",
+        ),
+        destinations=("Outlook", "Microsoft Teams"),
+        tools=(
+            _RecipeToolSpec("contoso-expenses", "search_expense_reports"),
+            _RecipeToolSpec("contoso-expenses", "get_expense_report"),
+            _RecipeToolSpec("contoso-expenses", "list_expense_lines"),
+            _RecipeToolSpec("contoso-expenses", "list_cost_centres"),
+            _RecipeToolSpec("contoso-expenses", "list_approvals"),
+            _RecipeToolSpec("contoso-expenses", "update_expense_report"),
+        ),
+    ),
+    _RecipeSpec(
+        slug="expense-manager-lookup",
+        title="Expense + manager lookup",
+        summary="Combine expense review with HR manager lookup for approval routing.",
+        department="Finance & Procurement",
+        skill="advanced",
+        agent_instructions=_agent_instructions(
+            "You are a cross-system expense routing assistant for Finance and HR operations.",
+            (
+                "Help approvers review expense reports and identify the correct "
+                "employee or manager "
+                "context from HRIS before routing a follow-up. This recipe intentionally combines "
+                "Contoso Travel Expenses with Northwind HRIS."
+            ),
+            (
+                "Use search_expense_reports, get_expense_report, list_expense_lines, and "
+                "list_approvals to understand the finance record. Use search_employees and "
+                "get_employee to confirm the employee profile, department, and "
+                "manager chain before "
+                "recommending who should act next."
+            ),
+            (
+                "If the expense record and HR employee record cannot be matched "
+                "confidently, stop and "
+                "ask for an employee ID or report ID. Do not route approval messages to a manager "
+                "unless the manager is present in the HRIS tool results."
+            ),
+            (
+                "Use a precise, compliance-minded tone. Separate facts from "
+                "recommendations and make "
+                "clear which system each fact came from."
+            ),
+        ),
+        example_prompts=(
+            "Who should approve expense report EXP-1007 based on the employee manager?",
+            "Find Amara Singh's pending expense report and manager.",
+            "Draft the Teams follow-up for a manager when an expense report is missing receipts.",
+        ),
+        destinations=("Microsoft Teams", "Outlook"),
+        tools=(
+            _RecipeToolSpec("contoso-expenses", "search_expense_reports"),
+            _RecipeToolSpec("contoso-expenses", "get_expense_report"),
+            _RecipeToolSpec("contoso-expenses", "list_expense_lines"),
+            _RecipeToolSpec("contoso-expenses", "list_approvals"),
+            _RecipeToolSpec("northwind-hris", "search_employees"),
+            _RecipeToolSpec("northwind-hris", "get_employee"),
+        ),
+    ),
+    _RecipeSpec(
+        slug="order-problem-it-ticket",
+        title="Order problem → IT ticket",
+        summary="Investigate order issues and connect them to service-desk follow-up.",
+        department="Operations & Supply Chain",
+        skill="advanced",
+        agent_instructions=_agent_instructions(
+            "You are an Operations and IT coordination assistant for order-related incidents.",
+            (
+                "Help operations users diagnose whether an order problem is a "
+                "fulfillment question, "
+                "a data issue, or something that needs service-desk follow-up. "
+                "This recipe combines "
+                "Contoso Orders with Fabrikam IT Service Desk."
+            ),
+            (
+                "Use search_orders, get_order, and list_order_lines to confirm "
+                "the order details and "
+                "affected products. Use search_tickets to look for existing related incidents, "
+                "list_service_catalog to identify the right IT service, and "
+                "update_ticket only when "
+                "a matching ticket already exists and the user has supplied the update."
+            ),
+            (
+                "If no related ticket exists, explain that this mock IT server "
+                "exposes update but not "
+                "create capabilities, then draft the exact ticket summary, impact, "
+                "and routing details "
+                "for the user to submit elsewhere."
+            ),
+            (
+                "Use an incident-coordination tone: direct, factual, and "
+                "action-oriented. Keep order "
+                "facts, ticket facts, and recommended next steps clearly separated."
+            ),
+        ),
+        example_prompts=(
+            "Order 1018 looks stuck; check if there is an IT ticket for it.",
+            "Find data issues for cancelled orders and suggest the IT service to route them to.",
+            "Update the related ticket after confirming the affected order lines.",
+        ),
+        destinations=("Microsoft Teams", "Planner"),
+        tools=(
+            _RecipeToolSpec("contoso-orders", "search_orders"),
+            _RecipeToolSpec("contoso-orders", "get_order"),
+            _RecipeToolSpec("contoso-orders", "list_order_lines"),
+            _RecipeToolSpec("fabrikam-it-service", "search_tickets"),
+            _RecipeToolSpec("fabrikam-it-service", "list_service_catalog"),
+            _RecipeToolSpec("fabrikam-it-service", "update_ticket"),
+        ),
+    ),
+)
+
+
+def _seed_recipes(conn: sqlite3.Connection) -> int:
+    server_ids_by_slug = {
+        str(server["slug"]): int(server["id"]) for server in service.list_servers(conn)
+    }
+    for recipe in _RECIPE_SPECS:
+        service.create_recipe(
+            conn,
+            slug=recipe.slug,
+            title=recipe.title,
+            summary=recipe.summary,
+            department=recipe.department,
+            skill=recipe.skill,
+            agent_instructions=recipe.agent_instructions,
+            example_prompts=list(recipe.example_prompts),
+            destinations=list(recipe.destinations),
+            published=True,
+            tools=[
+                {
+                    "server_id": server_ids_by_slug[tool.server_slug],
+                    "tool_name": tool.tool_name,
+                }
+                for tool in recipe.tools
+            ],
+        )
+    return len(_RECIPE_SPECS)
 
 
 def _seed_hr_server(conn: sqlite3.Connection) -> None:
@@ -1436,6 +1843,7 @@ def seed_if_empty(conn: sqlite3.Connection) -> bool:
     _seed_it_server(conn)
     _seed_crm_server(conn)
     _seed_finance_server(conn)
+    recipe_count = _seed_recipes(conn)
 
     llm = service.create_llm_endpoint(
         conn,
@@ -1479,7 +1887,7 @@ def seed_if_empty(conn: sqlite3.Connection) -> bool:
 
     logger.info(
         "finished demo seeding: 5 servers, 15 datasets, 42 endpoints, 12 relationships, "
-        f"{len(_ORDERS)} orders, {len(_ORDER_LINES)} order lines, "
+        f"{recipe_count} recipes, {len(_ORDERS)} orders, {len(_ORDER_LINES)} order lines, "
         f"{len(_HR_EMPLOYEES)} employees, {len(_IT_TICKETS)} IT tickets, "
         f"{len(_CRM_ACCOUNTS)} CRM accounts, {len(_FINANCE_EXPENSE_REPORTS)} expense reports, "
         "1 mock LLM"

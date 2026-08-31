@@ -322,3 +322,60 @@ def test_employees_manager_self_reference_expands(conn: sqlite3.Connection) -> N
     managers = [row.get("manager") for row in expanded]
     assert any(isinstance(m, dict) for m in managers), "no employee expanded to a manager dict"
     assert any(m is None for m in managers), "every employee has a manager — top-of-org row missing"
+
+
+def test_seed_creates_seven_published_recipes(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+
+    recipes = service.list_recipes(conn)
+
+    assert len(recipes) == 7
+    assert all(recipe["published"] for recipe in recipes)
+
+
+def test_seeded_recipes_include_cross_server_scenarios(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+
+    recipes = service.list_recipes(conn)
+    cross_server_recipes = [
+        recipe
+        for recipe in recipes
+        if len({int(tool["server_id"]) for tool in recipe["tools"]}) > 1
+    ]
+
+    assert len(cross_server_recipes) >= 2
+
+
+def test_seeded_recipe_tools_resolve_to_real_endpoints(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+
+    endpoint_names_by_server: dict[int, set[str]] = {}
+    for server in service.list_servers(conn):
+        server_id = int(server["id"])
+        endpoints = service.list_endpoints(conn, server_id)
+        endpoint_names_by_server[server_id] = {str(endpoint["tool_name"]) for endpoint in endpoints}
+
+    for recipe in service.list_recipes(conn):
+        for tool in recipe["tools"]:
+            server_id = int(tool["server_id"])
+            assert str(tool["tool_name"]) in endpoint_names_by_server[server_id]
+
+
+def test_seeded_recipes_have_prompts_tools_and_instructions(
+    conn: sqlite3.Connection,
+) -> None:
+    assert seed.seed_if_empty(conn) is True
+
+    for recipe in service.list_recipes(conn):
+        assert len(recipe["example_prompts"]) >= 3
+        assert len(recipe["tools"]) >= 3
+        assert len(str(recipe["agent_instructions"]).strip()) > 200
+
+
+def test_seeded_recipes_validate_without_issues(conn: sqlite3.Connection) -> None:
+    assert seed.seed_if_empty(conn) is True
+
+    result = service.validate_recipes(conn)
+
+    assert result["ok"] is True
+    assert result["issues"] == []
