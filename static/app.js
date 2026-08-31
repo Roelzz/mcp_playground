@@ -3,6 +3,7 @@
 
   var TABS = [
     ["catalog", "Catalog"],
+    ["recipes", "Recipes"],
     ["cohort", "Cohort"],
     ["servers", "Servers"],
     ["datasets", "Datasets"],
@@ -31,6 +32,13 @@
     selectedDatasetId: null,
     datasetDetails: {},
     datasetRows: {},
+    recipes: [],
+    recipeDetails: {},
+    selectedRecipeId: null,
+    recipeDraft: null,
+    recipeEndpointDetails: {},
+    recipeToolServerId: null,
+    recipeToolName: "",
     endpoints: [],
     llms: [],
     selectedLlmId: null,
@@ -93,6 +101,11 @@
     return state.datasets.find(function (d) { return String(d.id) === String(state.selectedDatasetId); }) || state.datasets[0] || null;
   }
 
+  function selectedRecipe() {
+    if (!state.selectedRecipeId) return null;
+    return state.recipes.find(function (r) { return String(r.id) === String(state.selectedRecipeId); }) || null;
+  }
+
   function selectedLlm() {
     return state.llms.find(function (l) { return String(l.id) === String(state.selectedLlmId); }) || state.llms[0] || null;
   }
@@ -111,6 +124,10 @@
 
   function llmUrl(llm) {
     return llm ? window.location.origin + "/v1/" + llm.slug + "/chat/completions" : "";
+  }
+
+  function recipeUrl(slug) {
+    return window.location.origin + "/r/" + (slug || "");
   }
 
   function toast(message, type) {
@@ -268,7 +285,7 @@
     state.servers = initial[0];
     state.catalog = initial[1] || [];
     if (!state.selectedServerId && state.servers.length) state.selectedServerId = state.servers[0].id;
-    await Promise.all([loadDatasets(), loadEndpoints(), loadLlms(), loadRelationships()]);
+    await Promise.all([loadDatasets(), loadEndpoints(), loadLlms(), loadRelationships(), loadRecipes()]);
   }
 
   async function loadCatalog() {
@@ -330,6 +347,39 @@
     state.endpoints = server ? await api("/api/servers/" + server.id + "/endpoints") : [];
   }
 
+  async function loadRecipes() {
+    state.recipes = await api("/api/recipes") || [];
+    if (state.selectedRecipeId && !state.recipes.some(function (r) { return String(r.id) === String(state.selectedRecipeId); })) {
+      state.selectedRecipeId = null;
+      state.recipeDraft = null;
+    }
+    if (!state.selectedRecipeId && state.recipes.length && !state.recipeDraft) state.selectedRecipeId = state.recipes[0].id;
+    if (state.selectedRecipeId) await loadRecipeDetail(state.selectedRecipeId);
+    else if (!state.recipeDraft) state.recipeDraft = emptyRecipeDraft();
+    await ensureRecipeToolEndpoints();
+  }
+
+  async function loadRecipeDetail(id) {
+    if (!id) return;
+    var detail = await api("/api/recipes/" + id);
+    state.recipeDetails[id] = detail;
+    state.recipeDraft = recipeToDraft(detail);
+  }
+
+  async function loadRecipeEndpointsForServer(serverId) {
+    if (!serverId || state.recipeEndpointDetails[serverId]) return;
+    state.recipeEndpointDetails[serverId] = await api("/api/servers/" + serverId + "/endpoints");
+  }
+
+  async function ensureRecipeToolEndpoints() {
+    var serverId = state.recipeToolServerId || (state.servers[0] && state.servers[0].id);
+    if (!serverId) return;
+    state.recipeToolServerId = Number(serverId);
+    await loadRecipeEndpointsForServer(state.recipeToolServerId);
+    var endpoints = state.recipeEndpointDetails[state.recipeToolServerId] || [];
+    if (!endpoints.some(function (e) { return e.tool_name === state.recipeToolName; })) state.recipeToolName = endpoints[0] ? endpoints[0].tool_name : "";
+  }
+
   async function loadLlms() {
     state.llms = await api("/api/llm-endpoints");
     if (state.llms.length && !selectedLlm()) state.selectedLlmId = state.llms[0].id;
@@ -374,6 +424,7 @@
 
   function pageHtml() {
     if (state.tab === "catalog") return renderCatalog();
+    if (state.tab === "recipes") return renderRecipes();
     if (state.tab === "cohort") return renderCohort();
     if (state.tab === "servers") return renderServers();
     if (state.tab === "datasets") return renderDatasets();
@@ -407,15 +458,26 @@
     return Number.isFinite(Number(value)) ? Number(value) : 0;
   }
 
+  function recipeCountForServer(serverId) {
+    var seen = {};
+    (state.recipes || []).forEach(function (recipe) {
+      (recipe.tools || []).forEach(function (tool) {
+        if (String(tool.server_id) === String(serverId)) seen[recipe.id] = true;
+      });
+    });
+    return Object.keys(seen).length;
+  }
+
   function authLabel(server) {
     return server && server.auth_mode === "api_key" ? "API key" : "No auth";
   }
 
   function catalogCard(server) {
+    var recipeCount = recipeCountForServer(server.id);
     return "<article class=\"card catalog-card\"><div class=\"catalog-card-head\"><div><h3>" + esc(server.name) + "</h3><div class=\"catalog-slug\">" + esc(server.slug) + "</div></div>" +
       "<div class=\"auth-pill catalog-auth-pill\"><span class=\"auth-option\">" + esc(authLabel(server)) + "</span></div></div>" +
       "<div class=\"card-desc\">" + esc(server.description || "No description") + "</div>" +
-      "<div class=\"catalog-metrics\"><span class=\"badge\">" + esc(metricCount(server.dataset_count)) + " datasets</span><span class=\"badge\">" + esc(metricCount(server.endpoint_count)) + " tools</span><span class=\"badge neutral\">" + esc(metricCount(server.row_count)) + " rows</span></div>" +
+      "<div class=\"catalog-metrics\"><span class=\"badge\">" + esc(metricCount(server.dataset_count)) + " datasets</span><span class=\"badge\">" + esc(metricCount(server.endpoint_count)) + " tools</span><span class=\"badge neutral\">" + esc(metricCount(server.row_count)) + " rows</span><span class=\"badge neutral\">" + esc(recipeCount) + " recipe" + (recipeCount === 1 ? "" : "s") + "</span></div>" +
       "<div class=\"actions\"><button class=\"btn small\" data-action=\"clone-server\" data-id=\"" + esc(server.id) + "\"" + disabledIfReadonly() + ">Clone</button><button class=\"btn small primary\" data-action=\"bulk-clone-server\" data-id=\"" + esc(server.id) + "\"" + disabledIfReadonly() + ">Bulk clone</button></div></article>";
   }
 
@@ -568,6 +630,113 @@
       area("rows_text", "Rows", "", "Paste a JSON array or CSV with a header row", "json") + "<div id=\"dataset-preview\" class=\"tabs-note\">Paste rows to preview the schema.</div>" +
       "<button class=\"btn primary\" type=\"submit\"" + disabledIfReadonly() + ">Create dataset</button></form><h3>Datasets</h3><div class=\"select-list\">" + datasetListHtml() + "</div></section>" +
       "<section class=\"panel\">" + datasetDetailHtml(detail, rows) + "</section></div>" + renderRelationships());
+  }
+
+  function emptyRecipeDraft() {
+    return {
+      id: null,
+      slug: "",
+      title: "",
+      summary: "",
+      department: "",
+      skill: "beginner",
+      agent_instructions: "",
+      example_prompts: [],
+      destinations: [],
+      published: false,
+      tools: []
+    };
+  }
+
+  function recipeToDraft(recipe) {
+    var draft = emptyRecipeDraft();
+    Object.keys(draft).forEach(function (key) {
+      if (recipe && recipe[key] != null) draft[key] = Array.isArray(recipe[key]) ? recipe[key].slice() : recipe[key];
+    });
+    draft.tools = (recipe && recipe.tools || []).slice().sort(function (a, b) { return (a.ordinal || 0) - (b.ordinal || 0); }).map(function (tool) {
+      return { server_id: Number(tool.server_id), tool_name: tool.tool_name, server_slug: tool.server_slug, server_name: tool.server_name };
+    });
+    return draft;
+  }
+
+  function selectedRecipeDraft() {
+    return state.recipeDraft || recipeToDraft(selectedRecipe()) || emptyRecipeDraft();
+  }
+
+  function recipeServerName(serverId) {
+    var server = state.servers.find(function (s) { return String(s.id) === String(serverId); });
+    return server ? server.name : "server #" + serverId;
+  }
+
+  function renderRecipes() {
+    var draft = selectedRecipeDraft();
+    return pageHeader("Recipes", "Author multi-server training scenarios with instructions, prompts, destinations, and MCP tools.") +
+      "<div class=\"two-col\"><section class=\"panel\"><div class=\"panel-heading\"><div><h2>Recipes</h2><p>" + esc(state.recipes.length) + " scenario" + (state.recipes.length === 1 ? "" : "s") + "</p></div><button class=\"btn primary\" type=\"button\" data-action=\"new-recipe\"" + disabledIfReadonly() + ">New recipe</button></div><div class=\"select-list\">" + recipeListHtml() + "</div></section>" +
+      "<section class=\"panel\"><h2>" + (draft.id ? "Edit recipe" : "Create recipe") + "</h2>" + recipeFormHtml(draft) + "</section></div>";
+  }
+
+  function recipeListHtml() {
+    if (!state.recipes.length) return "<div class=\"empty\">No recipes yet.</div>";
+    return state.recipes.map(function (recipe) {
+      var skill = recipe.skill || "beginner";
+      var badges = "<span class=\"badge skill-" + esc(skill) + "\">" + esc(skill) + "</span>" + (!recipe.published ? "<span class=\"badge neutral\">draft</span>" : "");
+      return "<button type=\"button\" class=\"list-item " + (String(recipe.id) === String(state.selectedRecipeId) ? "active" : "") + "\" data-action=\"select-recipe\" data-id=\"" + esc(recipe.id) + "\"><span class=\"list-title\">" + esc(recipe.title) + "</span><span class=\"list-meta\">" + badges + " " + esc(recipe.department || "No department") + " · " + esc((recipe.tools || []).length) + " tools</span></button>";
+    }).join("");
+  }
+
+  function recipeFormHtml(draft) {
+    var deleteDisabled = draft.id ? disabledIfReadonly() : " disabled";
+    return "<form class=\"form-grid\" data-form=\"recipe\">" + hidden("id", draft.id) +
+      recipePublicCalloutHtml(draft) +
+      input("slug", "Slug", draft.slug, "order-status-coach") +
+      input("title", "Title", draft.title, "Order status coach") +
+      input("department", "Department", draft.department, "Customer service") +
+      select("skill", "Skill", draft.skill || "beginner", [["beginner", "beginner"], ["intermediate", "intermediate"], ["advanced", "advanced"]]) +
+      area("summary", "Summary", draft.summary, "What trainees practice") +
+      "<div class=\"form-row\"><label for=\"agent_instructions\">Agent instructions</label><textarea id=\"agent_instructions\" name=\"agent_instructions\" rows=\"9\" placeholder=\"Instructions trainees should paste into their agent\">" + esc(draft.agent_instructions || "") + "</textarea></div>" +
+      "<div class=\"form-row\"><label><input type=\"checkbox\" name=\"published\" style=\"width:auto\"" + (draft.published ? " checked" : "") + "> Published</label></div>" +
+      recipeRepeaterHtml("example_prompts", "Example prompts", draft.example_prompts, "Ask about an order", "add-recipe-prompt", "remove-recipe-prompt") +
+      recipeRepeaterHtml("destinations", "Destinations", draft.destinations, "Copilot Studio", "add-recipe-destination", "remove-recipe-destination") +
+      recipeToolsEditorHtml(draft) +
+      "<div class=\"actions\"><button class=\"btn primary\" type=\"submit\"" + disabledIfReadonly() + ">Save</button><button class=\"btn danger\" type=\"button\" data-action=\"delete-recipe\" data-id=\"" + esc(draft.id || "") + "\" data-name=\"" + esc(draft.title || draft.slug || "recipe") + "\"" + deleteDisabled + ">Delete</button><button class=\"btn\" type=\"button\" data-action=\"copy-recipe-link\">Copy public link</button><button class=\"btn\" type=\"button\" data-action=\"open-recipe-page\">Open public page</button><button class=\"btn\" type=\"button\" data-action=\"download-recipe-handout\"" + (draft.id ? "" : " disabled") + ">Download handout</button></div></form>";
+  }
+
+  function recipePublicCalloutHtml(draft) {
+    return "<div id=\"recipe-public-callout\" class=\"callout " + (draft.published ? "ok" : "warn") + "\">" + (draft.published ? "Public URL: " + esc(recipeUrl(draft.slug)) : "This recipe is not publicly visible yet.") + "</div>";
+  }
+
+  function recipeRepeaterHtml(name, label, values, placeholder, addAction, removeAction) {
+    var rows = (values || []).map(function (value, index) {
+      return "<div class=\"actions\"><input name=\"" + esc(name) + "\" value=\"" + esc(value) + "\" placeholder=\"" + esc(placeholder) + "\"><button class=\"btn small danger\" type=\"button\" data-action=\"" + esc(removeAction) + "\" data-index=\"" + esc(index) + "\"" + disabledIfReadonly() + ">Remove</button></div>";
+    }).join("");
+    return "<div class=\"form-row\"><label>" + esc(label) + "</label><div class=\"form-grid\">" + (rows || "<div class=\"empty\">None yet.</div>") + "<div class=\"actions\"><button class=\"btn small\" type=\"button\" data-action=\"" + esc(addAction) + "\"" + disabledIfReadonly() + ">Add</button></div></div></div>";
+  }
+
+  function recipeToolsEditorHtml(draft) {
+    var serverId = state.recipeToolServerId || (state.servers[0] && state.servers[0].id);
+    var serverOptions = state.servers.map(function (server) {
+      return "<option value=\"" + esc(server.id) + "\"" + (String(server.id) === String(serverId) ? " selected" : "") + ">" + esc(server.name) + " (" + esc(server.slug) + ")</option>";
+    }).join("");
+    return "<div class=\"form-row\"><label>Tools</label><div class=\"form-grid\">" +
+      (!state.servers.length ? "<div class=\"empty\">Create a server first.</div>" : "<div class=\"actions\"><select id=\"recipe-tool-server\" data-action=\"select-recipe-tool-server\">" + serverOptions + "</select><select id=\"recipe-tool-name\" data-action=\"select-recipe-tool-name\">" + recipeToolOptionsHtml(serverId) + "</select><button class=\"btn small\" type=\"button\" data-action=\"add-recipe-tool\"" + disabledIfReadonly() + ">Add</button></div>") +
+      recipeChosenToolsHtml(draft) + "</div></div>";
+  }
+
+  function recipeToolOptionsHtml(serverId) {
+    var endpoints = state.recipeEndpointDetails[serverId] || [];
+    if (!endpoints.length) return "<option value=\"\">No tools</option>";
+    return endpoints.map(function (endpoint) {
+      var selected = endpoint.tool_name === state.recipeToolName;
+      return "<option value=\"" + esc(endpoint.tool_name) + "\"" + (selected ? " selected" : "") + ">" + esc(endpoint.tool_name) + "</option>";
+    }).join("");
+  }
+
+  function recipeChosenToolsHtml(draft) {
+    if (!draft.tools.length) return "<div class=\"empty\">No tools selected.</div>";
+    return "<div class=\"select-list\">" + draft.tools.map(function (tool, index) {
+      var serverLabel = tool.server_name || recipeServerName(tool.server_id);
+      return "<div class=\"list-item\"><span class=\"list-title\">" + esc(tool.tool_name) + "</span><span class=\"list-meta\"><span class=\"badge neutral\">" + esc(serverLabel) + "</span></span><button class=\"btn small danger\" type=\"button\" data-action=\"remove-recipe-tool\" data-index=\"" + esc(index) + "\"" + disabledIfReadonly() + ">Remove</button></div>";
+    }).join("") + "</div>";
   }
 
   function renderRelationships() {
@@ -937,10 +1106,65 @@
     applyToolSearch();
     applyCohortFilter();
     updateDatasetPreview();
+    updateRecipePublicCallout();
   }
 
   function formData(form) {
     return Object.fromEntries(new FormData(form).entries());
+  }
+
+  function readRecipeListInputs(form, name) {
+    return Array.prototype.map.call(form.querySelectorAll("[name='" + name + "']"), function (inputEl) {
+      return inputEl.value.trim();
+    }).filter(Boolean);
+  }
+
+  function captureRecipeDraft() {
+    var form = document.querySelector("form[data-form='recipe']");
+    if (!form) return selectedRecipeDraft();
+    var data = formData(form);
+    state.recipeDraft = {
+      id: data.id ? Number(data.id) : null,
+      slug: (data.slug || "").trim(),
+      title: (data.title || "").trim(),
+      summary: data.summary || "",
+      department: (data.department || "").trim(),
+      skill: data.skill || "beginner",
+      agent_instructions: data.agent_instructions || "",
+      example_prompts: readRecipeListInputs(form, "example_prompts"),
+      destinations: readRecipeListInputs(form, "destinations"),
+      published: !!form.elements.published.checked,
+      tools: (state.recipeDraft && state.recipeDraft.tools || []).slice()
+    };
+    return state.recipeDraft;
+  }
+
+  function recipePayloadFromForm(form) {
+    var draft = captureRecipeDraft();
+    return {
+      slug: draft.slug,
+      title: draft.title,
+      summary: draft.summary,
+      department: draft.department,
+      skill: draft.skill,
+      agent_instructions: draft.agent_instructions,
+      example_prompts: draft.example_prompts,
+      destinations: draft.destinations,
+      published: draft.published,
+      tools: draft.tools.map(function (tool) {
+        return { server_id: Number(tool.server_id), tool_name: tool.tool_name };
+      })
+    };
+  }
+
+  function updateRecipePublicCallout() {
+    var callout = document.getElementById("recipe-public-callout");
+    var form = document.querySelector("form[data-form='recipe']");
+    if (!callout || !form) return;
+    var slug = (form.elements.slug.value || "").trim();
+    var published = !!form.elements.published.checked;
+    callout.className = "callout " + (published ? "ok" : "warn");
+    callout.textContent = published ? "Public URL: " + recipeUrl(slug) : "This recipe is not publicly visible yet.";
   }
 
   function parseCsv(text) {
@@ -1205,6 +1429,7 @@
     if (event.target.matches("[data-bulk-clone-field]")) updateBulkClonePreview();
     if (event.target.matches("form[data-form='endpoint'] input[name='path']")) updateToolTypePreview();
     if (event.target.matches("form[data-form='dataset'] textarea, form[data-form='dataset'] select")) updateDatasetPreview();
+    if (event.target.matches("form[data-form='recipe'] input[name='slug']")) updateRecipePublicCallout();
   });
 
   document.addEventListener("change", async function (event) {
@@ -1230,6 +1455,15 @@
       state.testTool = event.target.value;
       updateToolHelp();
     }
+    if (event.target.matches("form[data-form='recipe'] input[name='published']")) updateRecipePublicCallout();
+    if (event.target.matches("#recipe-tool-server")) {
+      captureRecipeDraft();
+      state.recipeToolServerId = Number(event.target.value);
+      state.recipeToolName = "";
+      await ensureRecipeToolEndpoints();
+      render();
+    }
+    if (event.target.matches("#recipe-tool-name")) state.recipeToolName = event.target.value;
   });
 
   document.addEventListener("submit", async function (event) {
@@ -1247,6 +1481,7 @@
       if (form.dataset.form === "dataset-meta") await submitDatasetMeta(form);
       if (form.dataset.form === "rows") await submitRows(form);
       if (form.dataset.form === "endpoint") await submitEndpoint(form);
+      if (form.dataset.form === "recipe") await submitRecipe(form);
       if (form.dataset.form === "llm") await submitLlm(form);
       if (form.dataset.form === "tool-call") await submitToolCall(form);
       if (form.dataset.form === "key") await submitKey(form);
@@ -1286,6 +1521,18 @@
       if (action === "edit-endpoint") { state.editingEndpointId = Number(button.dataset.id); render(); }
       if (action === "cancel-endpoint-edit") { state.editingEndpointId = null; render(); }
       if (action === "delete-endpoint") await deleteItem("endpoint", button.dataset.id, button.dataset.name, "/api/endpoints/" + button.dataset.id, async function () { await loadEndpoints(); });
+      if (action === "new-recipe") { state.selectedRecipeId = null; state.recipeDraft = emptyRecipeDraft(); render(); }
+      if (action === "select-recipe") { state.selectedRecipeId = Number(button.dataset.id); await loadRecipeDetail(state.selectedRecipeId); await ensureRecipeToolEndpoints(); render(); }
+      if (action === "add-recipe-prompt") { captureRecipeDraft(); state.recipeDraft.example_prompts.push(""); render(); }
+      if (action === "remove-recipe-prompt") { captureRecipeDraft(); state.recipeDraft.example_prompts.splice(Number(button.dataset.index), 1); render(); }
+      if (action === "add-recipe-destination") { captureRecipeDraft(); state.recipeDraft.destinations.push(""); render(); }
+      if (action === "remove-recipe-destination") { captureRecipeDraft(); state.recipeDraft.destinations.splice(Number(button.dataset.index), 1); render(); }
+      if (action === "add-recipe-tool") { addRecipeTool(); render(); }
+      if (action === "remove-recipe-tool") { captureRecipeDraft(); state.recipeDraft.tools.splice(Number(button.dataset.index), 1); render(); }
+      if (action === "delete-recipe") await deleteRecipe(button);
+      if (action === "copy-recipe-link") await copyRecipeLink();
+      if (action === "open-recipe-page") openRecipePage();
+      if (action === "download-recipe-handout") downloadRecipeHandout();
       if (action === "select-test-tool") { captureTestForm(); state.testTool = button.dataset.tool; render(); }
       if (action === "edit-llm") { state.editingLlmId = Number(button.dataset.id); await loadLlmDetail(state.editingLlmId); render(); }
       if (action === "cancel-llm-edit") { state.editingLlmId = null; state.llmRules = []; render(); }
@@ -1431,6 +1678,70 @@
     await loadEndpoints();
     render();
     toast("Endpoint saved.", "ok");
+  }
+
+  function addRecipeTool() {
+    var serverSelect = document.getElementById("recipe-tool-server");
+    var toolSelect = document.getElementById("recipe-tool-name");
+    var draft = captureRecipeDraft();
+    if (!serverSelect || !toolSelect || !toolSelect.value) {
+      toast("Select a server and tool first.", "error");
+      return;
+    }
+    var serverId = Number(serverSelect.value);
+    var toolName = toolSelect.value;
+    if (draft.tools.some(function (tool) { return Number(tool.server_id) === serverId && tool.tool_name === toolName; })) {
+      toast("That tool is already in this recipe.", "error");
+      return;
+    }
+    draft.tools.push({ server_id: serverId, tool_name: toolName, server_name: recipeServerName(serverId) });
+    state.recipeDraft = draft;
+  }
+
+  async function submitRecipe(form) {
+    var data = formData(form);
+    var payload = recipePayloadFromForm(form);
+    var saved;
+    if (data.id) {
+      var tools = payload.tools;
+      delete payload.tools;
+      saved = await api("/api/recipes/" + data.id, { method: "PATCH", body: JSON.stringify(payload) });
+      saved = await api("/api/recipes/" + saved.id + "/tools", { method: "PUT", body: JSON.stringify({ tools: tools }) });
+    } else {
+      saved = await api("/api/recipes", { method: "POST", body: JSON.stringify(payload) });
+    }
+    state.selectedRecipeId = saved.id;
+    state.recipeDraft = recipeToDraft(saved);
+    await loadRecipes();
+    render();
+    toast("Recipe saved.", "ok");
+  }
+
+  async function deleteRecipe(button) {
+    if (!button.dataset.id) return;
+    if (!await confirmModal("Delete recipe", "Delete " + button.dataset.name + "? This cannot be undone from this UI.", "Delete")) return;
+    await api("/api/recipes/" + button.dataset.id, { method: "DELETE" });
+    state.selectedRecipeId = null;
+    state.recipeDraft = null;
+    await loadRecipes();
+    render();
+    toast("Recipe deleted.", "ok");
+  }
+
+  async function copyRecipeLink() {
+    var draft = captureRecipeDraft();
+    await copyText(recipeUrl(draft.slug));
+  }
+
+  function openRecipePage() {
+    var draft = captureRecipeDraft();
+    window.open(recipeUrl(draft.slug), "_blank", "noopener");
+  }
+
+  function downloadRecipeHandout() {
+    var draft = captureRecipeDraft();
+    if (!draft.id) return;
+    window.location.href = "/api/recipes/" + encodeURIComponent(draft.id) + "/handout?download=true";
   }
 
   async function submitLlm(form) {
@@ -1636,7 +1947,8 @@
     if (!tab) return;
     state.tab = tab.dataset.tab;
     try {
-      if (state.tab === "catalog") await loadCatalog();
+      if (state.tab === "catalog") { await loadCatalog(); await loadRecipes(); }
+      if (state.tab === "recipes") await loadRecipes();
       if (state.tab === "cohort") await loadCohortPage();
       if (state.tab === "datasets") { await loadDatasets(); await loadRelationships(); }
       if (state.tab === "endpoints") await refreshForServer();
