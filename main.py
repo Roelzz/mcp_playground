@@ -19,6 +19,7 @@ import db
 import llm
 import mcp_builder
 import portability
+import recipes
 import rest
 import seed
 import service
@@ -57,6 +58,7 @@ app.include_router(auth.router)
 app.include_router(api.router)
 app.include_router(llm.router)
 app.include_router(portability.router)
+app.include_router(recipes.router)
 app.include_router(rest.router)
 
 
