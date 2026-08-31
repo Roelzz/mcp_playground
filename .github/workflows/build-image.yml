@@ -1,9 +1,8 @@
 # Builds and publishes the container image to ghcr.io.
-# GHCR packages default to private, so after the first successful run go to the
-# package settings on GitHub and change visibility to Public.
-# Recommended setup: private repo + public package. Source stays closed, while
-# Azure Container Apps can pull the image without registry credentials.
-# Use this image in infra/main.parameters.json: ghcr.io/<owner>/<repo>:latest
+# Package visibility is inherited from the repository. Roelzz/mcp_playground is public,
+# so the package is public and Azure Container Apps pulls it without credentials.
+# If the repo is ever made private, flip the package back to Public in package settings.
+# Image consumed by infra/main.parameters.json: ghcr.io/roelzz/mcp_playground:latest
 
 name: Build image
 

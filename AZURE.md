@@ -46,18 +46,33 @@ Running 24/7 without scale-to-zero is roughly 720 h/month, about €36/month. Sc
 - Azure CLI with the Bicep extension.
 - A GitHub repository.
 
-There is currently no git remote. Create a repo and push before the image workflow can run.
+This repo is `https://github.com/Roelzz/mcp_playground`, default branch `main`. The image
+workflow runs on every push to `main`.
 
-Use a **private repo with a public package**: source stays closed, Azure Container Apps pulls without registry credentials.
+The repo is **public**, so the GHCR package inherits public visibility and Azure Container
+Apps can pull without registry credentials. No manual visibility change is needed.
 
-After the first workflow run, flip the GHCR package to Public manually in GitHub package settings. Packages inherit repo visibility and default to private.
+If you later make the repo private, the package becomes private too and you must flip the
+package back to Public in GitHub package settings, otherwise the pull fails.
+
+Verify anonymous pullability at any time:
+
+```bash
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:roelzz/mcp_playground:pull&service=ghcr.io" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  https://ghcr.io/v2/roelzz/mcp_playground/manifests/latest
+```
+
+`200` means public. `401` or `403` means the package is private.
 
 ## 4. Deploy
 
-1. Push to GitHub. Let `.github/workflows/build-image.yml` build and push the image.
-2. Make the GHCR package public.
-3. Fill in `infra/main.parameters.json`:
-   - `containerImage`: `ghcr.io/<owner>/<repo>:latest`
+1. Push to `main`. `.github/workflows/build-image.yml` builds and pushes the image.
+2. Confirm the image is public with the curl check above.
+3. `infra/main.parameters.json` is already filled in:
+   - `containerImage`: `ghcr.io/roelzz/mcp_playground:latest`
    - `appName`: default `agent-playground`
    - `location`: default `westeurope`
    - `bootstrapUser`: default `admin`
@@ -173,7 +188,7 @@ Then:
 | Permission denied on `/data` | Azure Files mount permissions do not allow writes by non-root user `app`. | Run the `/data` probe from §9. Fix mount options or storage permissions. |
 | Copilot Studio connector test times out | Cold start after scale-to-zero. | Use the bootcamp day runbook in §7. |
 | Connectors point at `localhost` | `PUBLIC_BASE_URL` is wrong. | Set it to `https://<fqdn>` and re-export Swagger. |
-| `ImagePullBackOff` | GHCR package is still private. | Make the package public in GitHub package settings, then restart the Container App. |
+| `ImagePullBackOff` | GHCR package is private. | Make the package public in GitHub package settings, then restart the Container App. Public repos publish public packages automatically. |
 | No historical logs | Log Analytics is deliberately disabled. | Live streaming works. Attach a workspace temporarily if historical queries are needed. |
 
 ## 11. Known limitations
