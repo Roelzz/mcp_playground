@@ -10,7 +10,7 @@ from loguru import logger
 
 load_dotenv()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _TX_DEPTH: dict[int, int] = {}
 
@@ -144,6 +144,33 @@ CREATE TABLE IF NOT EXISTS dataset_relationship (
 CREATE INDEX IF NOT EXISTS idx_dsrel_server ON dataset_relationship(server_id);
 CREATE INDEX IF NOT EXISTS idx_dsrel_source ON dataset_relationship(source_dataset_id);
 CREATE INDEX IF NOT EXISTS idx_dsrel_target ON dataset_relationship(target_dataset_id);
+
+CREATE TABLE IF NOT EXISTS recipe (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug               TEXT NOT NULL UNIQUE,
+    title              TEXT NOT NULL,
+    summary            TEXT NOT NULL DEFAULT '',
+    department         TEXT NOT NULL DEFAULT '',
+    skill              TEXT NOT NULL DEFAULT 'beginner'
+        CHECK (skill IN ('beginner','intermediate','advanced')),
+    agent_instructions TEXT NOT NULL DEFAULT '',
+    example_prompts    TEXT NOT NULL DEFAULT '[]',
+    destinations       TEXT NOT NULL DEFAULT '[]',
+    published          INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS recipe_tool (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipe_id INTEGER NOT NULL REFERENCES recipe(id) ON DELETE CASCADE,
+    server_id INTEGER NOT NULL REFERENCES server(id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    ordinal   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (recipe_id, server_id, tool_name)
+);
+CREATE INDEX IF NOT EXISTS idx_recipe_tool_recipe ON recipe_tool(recipe_id);
+CREATE INDEX IF NOT EXISTS idx_recipe_tool_server ON recipe_tool(server_id);
+CREATE INDEX IF NOT EXISTS idx_recipe_published ON recipe(published);
 """
 
 

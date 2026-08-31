@@ -16,6 +16,9 @@ from models import (
     LLMEndpointCreate,
     LLMEndpointUpdate,
     LLMResponseSpec,
+    RecipeCreate,
+    RecipeToolsPayload,
+    RecipeUpdate,
     RelationshipCreate,
     RowsPayload,
     ServerCreate,
@@ -311,6 +314,74 @@ def set_llm_responses(
     _: Principal = Write,
 ) -> dict[str, Any]:
     return _handle(service.set_llm_responses, conn, llm_id, [r.model_dump() for r in body])
+
+
+# --------------------------------------------------------------------------- recipes
+
+
+@router.get("/recipes/validate")
+def validate_recipes(conn: sqlite3.Connection = Conn, _: Principal = Admin) -> dict[str, Any]:
+    return _handle(service.validate_recipes, conn)
+
+
+@router.get("/recipes/departments")
+def recipe_departments(
+    conn: sqlite3.Connection = Conn, _: Principal = Admin
+) -> list[dict[str, Any]]:
+    return _handle(service.recipe_departments, conn)
+
+
+@router.get("/recipes")
+def list_recipes(
+    published_only: bool = False,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Admin,
+) -> list[dict[str, Any]]:
+    return _handle(service.list_recipes, conn, published_only)
+
+
+@router.post("/recipes", status_code=201)
+def create_recipe(
+    body: RecipeCreate, conn: sqlite3.Connection = Conn, _: Principal = Write
+) -> dict[str, Any]:
+    return _handle(service.create_recipe, conn, **body.model_dump())
+
+
+@router.get("/recipes/{recipe_id}")
+def get_recipe(
+    recipe_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin
+) -> dict[str, Any]:
+    return _handle(service.get_recipe, conn, recipe_id)
+
+
+@router.patch("/recipes/{recipe_id}")
+def update_recipe(
+    recipe_id: int,
+    body: RecipeUpdate,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Write,
+) -> dict[str, Any]:
+    return _handle(service.update_recipe, conn, recipe_id, **body.model_dump(exclude_none=True))
+
+
+@router.delete("/recipes/{recipe_id}", status_code=204)
+def delete_recipe(recipe_id: int, conn: sqlite3.Connection = Conn, _: Principal = Write) -> None:
+    _handle(service.delete_recipe, conn, recipe_id)
+
+
+@router.put("/recipes/{recipe_id}/tools")
+def set_recipe_tools(
+    recipe_id: int,
+    body: RecipeToolsPayload,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Write,
+) -> dict[str, Any]:
+    return _handle(
+        service.set_recipe_tools,
+        conn,
+        recipe_id,
+        [tool.model_dump() for tool in body.tools],
+    )
 
 
 # ------------------------------------------------------------------------ tool call

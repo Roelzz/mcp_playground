@@ -3,6 +3,7 @@
 `api.py` and `admin_mcp.py` are thin wrappers over this. Neither may add logic.
 """
 
+import json
 import os
 import re
 import sqlite3
@@ -721,6 +722,253 @@ def set_llm_responses(
     with transaction(conn):
         store.set_llm_responses(conn, llm_id, normalised)
     return get_llm_endpoint(conn, llm_id)
+
+
+# --- recipes ----------------------------------------------------------------
+
+_RECIPE_SKILLS = {"beginner", "intermediate", "advanced"}
+
+
+def _require_recipe(conn: sqlite3.Connection, recipe_id: int) -> dict[str, Any]:
+    recipe = store.get_recipe(conn, recipe_id)
+    if recipe is None:
+        raise NotFound(f"recipe {recipe_id} not found")
+    return recipe
+
+
+def _validate_string_list(name: str, values: Any) -> list[str]:
+    if not isinstance(values, list):
+        raise ServiceError(f"{name} must be a list")
+    result: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value.strip():
+            raise ServiceError(f"{name}[{index}] must be a non-empty string")
+        result.append(value)
+    return result
+
+
+def _validate_recipe_fields(
+    conn: sqlite3.Connection,
+    fields: dict[str, Any],
+    recipe_id: int | None = None,
+    current: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged = dict(current or {})
+    merged.update(fields)
+
+    slug = str(merged.get("slug", "") or "")
+    _validate_slug(slug)
+    existing = store.get_recipe_by_slug(conn, slug)
+    if existing is not None and int(existing["id"]) != recipe_id:
+        raise Conflict(f"recipe slug {slug!r} already exists")
+
+    title = str(merged.get("title", "") or "").strip()
+    if not title:
+        raise ServiceError("title must not be empty")
+
+    skill = str(merged.get("skill", "beginner") or "beginner")
+    if skill not in _RECIPE_SKILLS:
+        raise ServiceError(f"skill must be one of {sorted(_RECIPE_SKILLS)}, got {skill!r}")
+
+    normalised = dict(fields)
+    if "title" in normalised:
+        normalised["title"] = str(normalised["title"]).strip()
+    if "example_prompts" in normalised:
+        normalised["example_prompts"] = json.dumps(
+            _validate_string_list("example_prompts", normalised["example_prompts"])
+        )
+    if "destinations" in normalised:
+        normalised["destinations"] = json.dumps(
+            _validate_string_list("destinations", normalised["destinations"])
+        )
+    return normalised
+
+
+def _validate_recipe_tools(
+    conn: sqlite3.Connection, tools: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    seen: set[tuple[int, str]] = set()
+    normalised: list[dict[str, Any]] = []
+    endpoint_names_by_server: dict[int, set[str]] = {}
+
+    for ordinal, tool in enumerate(tools):
+        server_id = int(tool["server_id"])
+        tool_name = str(tool["tool_name"]).strip()
+        key = (server_id, tool_name)
+        if key in seen:
+            raise ServiceError(
+                f"duplicate recipe tool reference for server {server_id} and tool {tool_name!r}"
+            )
+        seen.add(key)
+
+        if store.get_server(conn, server_id) is None:
+            raise ServiceError(f"server {server_id} referenced by recipe tool does not exist")
+        if server_id not in endpoint_names_by_server:
+            endpoint_names_by_server[server_id] = {
+                str(endpoint["tool_name"]) for endpoint in store.list_endpoints(conn, server_id)
+            }
+        if tool_name not in endpoint_names_by_server[server_id]:
+            raise ServiceError(
+                f"tool {tool_name!r} does not exist as an endpoint on server {server_id}"
+            )
+        normalised.append({"server_id": server_id, "tool_name": tool_name, "ordinal": ordinal})
+    return normalised
+
+
+def _with_recipe_tools(conn: sqlite3.Connection, recipe: dict[str, Any]) -> dict[str, Any]:
+    recipe["tools"] = store.list_recipe_tools(conn, int(recipe["id"]))
+    return recipe
+
+
+def list_recipes(
+    conn: sqlite3.Connection, published_only: bool = False
+) -> list[dict[str, Any]]:
+    recipes = store.list_recipes(conn, published_only=published_only)
+    tools_by_recipe = store.list_recipe_tools_bulk(conn, [int(recipe["id"]) for recipe in recipes])
+    for recipe in recipes:
+        recipe["tools"] = tools_by_recipe.get(int(recipe["id"]), [])
+    return recipes
+
+
+def get_recipe(conn: sqlite3.Connection, recipe_id: int) -> dict[str, Any]:
+    return _with_recipe_tools(conn, _require_recipe(conn, recipe_id))
+
+
+def get_recipe_by_slug(
+    conn: sqlite3.Connection, slug: str, published_only: bool = False
+) -> dict[str, Any]:
+    recipe = store.get_recipe_by_slug(conn, slug)
+    if recipe is None or (published_only and not recipe["published"]):
+        raise NotFound(f"recipe {slug!r} not found")
+    return _with_recipe_tools(conn, recipe)
+
+
+def create_recipe(conn: sqlite3.Connection, **fields: Any) -> dict[str, Any]:
+    tools = fields.pop("tools", []) or []
+    defaults = {
+        "summary": "",
+        "department": "",
+        "skill": "beginner",
+        "agent_instructions": "",
+        "example_prompts": [],
+        "destinations": [],
+        "published": False,
+    }
+    write_fields = _validate_recipe_fields(conn, {**defaults, **fields})
+    normalised_tools = _validate_recipe_tools(conn, tools)
+    with transaction(conn):
+        try:
+            recipe_id = store.create_recipe(conn, **write_fields)
+        except sqlite3.IntegrityError as exc:
+            raise Conflict(f"recipe slug {fields.get('slug')!r} already exists") from exc
+        store.replace_recipe_tools(conn, recipe_id, normalised_tools)
+    logger.info(f"created recipe {write_fields['slug']!r} (id={recipe_id})")
+    return get_recipe(conn, recipe_id)
+
+
+def update_recipe(conn: sqlite3.Connection, recipe_id: int, **fields: Any) -> dict[str, Any]:
+    current = _require_recipe(conn, recipe_id)
+    tools = fields.pop("tools", None)
+    fields = {key: value for key, value in fields.items() if value is not None}
+    write_fields = _validate_recipe_fields(conn, fields, recipe_id=recipe_id, current=current)
+    normalised_tools = None if tools is None else _validate_recipe_tools(conn, tools)
+    with transaction(conn):
+        store.update_recipe(conn, recipe_id, **write_fields)
+        if normalised_tools is not None:
+            store.replace_recipe_tools(conn, recipe_id, normalised_tools)
+    logger.info(f"updated recipe {recipe_id}")
+    return get_recipe(conn, recipe_id)
+
+
+def delete_recipe(conn: sqlite3.Connection, recipe_id: int) -> None:
+    recipe = _require_recipe(conn, recipe_id)
+    with transaction(conn):
+        store.delete_recipe(conn, recipe_id)
+    logger.info(f"deleted recipe {recipe['slug']!r} (id={recipe_id})")
+
+
+def set_recipe_tools(
+    conn: sqlite3.Connection, recipe_id: int, tools: list[dict[str, Any]]
+) -> dict[str, Any]:
+    _require_recipe(conn, recipe_id)
+    normalised_tools = _validate_recipe_tools(conn, tools)
+    with transaction(conn):
+        store.replace_recipe_tools(conn, recipe_id, normalised_tools)
+    return get_recipe(conn, recipe_id)
+
+
+def validate_recipes(conn: sqlite3.Connection) -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    try:
+        recipes = store.list_recipes(conn)
+        tools_by_recipe = store.list_recipe_tools_bulk(
+            conn, [int(recipe["id"]) for recipe in recipes]
+        )
+        endpoint_names_by_server: dict[int, set[str]] = {}
+        for recipe in recipes:
+            recipe_id = int(recipe["id"])
+            for tool in tools_by_recipe.get(recipe_id, []):
+                server_id = int(tool["server_id"])
+                tool_name = str(tool["tool_name"])
+                if tool.get("server_slug") is None:
+                    issues.append(
+                        {
+                            "recipe_id": recipe_id,
+                            "slug": recipe["slug"],
+                            "severity": "error",
+                            "server_id": server_id,
+                            "tool_name": tool_name,
+                            "message": f"server {server_id} no longer exists",
+                        }
+                    )
+                    continue
+                if server_id not in endpoint_names_by_server:
+                    endpoint_names_by_server[server_id] = {
+                        str(endpoint["tool_name"])
+                        for endpoint in store.list_endpoints(conn, server_id)
+                    }
+                if tool_name not in endpoint_names_by_server[server_id]:
+                    issues.append(
+                        {
+                            "recipe_id": recipe_id,
+                            "slug": recipe["slug"],
+                            "severity": "error",
+                            "server_id": server_id,
+                            "tool_name": tool_name,
+                            "message": (
+                                f"tool {tool_name!r} no longer exists as an endpoint"
+                                f" on server {server_id}"
+                            ),
+                        }
+                    )
+        return {
+            "recipe_count": len(recipes),
+            "ok": not any(issue["severity"] == "error" for issue in issues),
+            "issues": issues,
+        }
+    except Exception as exc:
+        logger.error(f"recipe validation failed: {exc}")
+        return {
+            "recipe_count": 0,
+            "ok": False,
+            "issues": [{"severity": "error", "message": f"validation failed: {exc}"}],
+        }
+
+
+def recipe_departments(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT department, COUNT(*) AS count
+        FROM recipe
+        GROUP BY department
+        ORDER BY department
+        """
+    ).fetchall()
+    return [{"department": str(row["department"]), "count": int(row["count"])} for row in rows]
+
+
+def recipe_counts_by_server(conn: sqlite3.Connection) -> dict[int, int]:
+    return store.count_recipes_by_server(conn)
 
 
 # ------------------------------------------------------------------------ tool calls

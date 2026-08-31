@@ -347,6 +347,170 @@ def delete_relationship(conn: sqlite3.Connection, relationship_id: int) -> None:
         conn.execute("DELETE FROM dataset_relationship WHERE id = ?", (relationship_id,))
 
 
+# --- recipe ---------------------------------------------------------------
+
+_RECIPE_FIELDS = {
+    "slug",
+    "title",
+    "summary",
+    "department",
+    "skill",
+    "agent_instructions",
+    "example_prompts",
+    "destinations",
+    "published",
+}
+
+
+def _json_list(value: str) -> list[Any]:
+    try:
+        loaded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return loaded if isinstance(loaded, list) else []
+
+
+def _recipe_row(r: sqlite3.Row | None) -> dict[str, Any] | None:
+    if r is None:
+        return None
+    d = dict(r)
+    d["published"] = bool(d["published"])
+    d["example_prompts"] = _json_list(d["example_prompts"])
+    d["destinations"] = _json_list(d["destinations"])
+    return d
+
+
+def _recipe_rows(rs: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [_recipe_row(r) for r in rs]  # type: ignore[misc]
+
+
+def list_recipes(
+    conn: sqlite3.Connection, published_only: bool = False
+) -> list[dict[str, Any]]:
+    if published_only:
+        return _recipe_rows(
+            conn.execute(
+                "SELECT * FROM recipe WHERE published = 1 ORDER BY department, title"
+            ).fetchall()
+        )
+    return _recipe_rows(conn.execute("SELECT * FROM recipe ORDER BY department, title").fetchall())
+
+
+def get_recipe(conn: sqlite3.Connection, recipe_id: int) -> dict[str, Any] | None:
+    return _recipe_row(conn.execute("SELECT * FROM recipe WHERE id = ?", (recipe_id,)).fetchone())
+
+
+def get_recipe_by_slug(conn: sqlite3.Connection, slug: str) -> dict[str, Any] | None:
+    return _recipe_row(conn.execute("SELECT * FROM recipe WHERE slug = ?", (slug,)).fetchone())
+
+
+def create_recipe(conn: sqlite3.Connection, **fields: Any) -> int:
+    sets = {k: v for k, v in fields.items() if k in _RECIPE_FIELDS and v is not None}
+    if "published" in sets:
+        sets["published"] = int(bool(sets["published"]))
+    cols = ", ".join(sets)
+    marks = ", ".join("?" for _ in sets)
+    with transaction(conn):
+        cur = conn.execute(f"INSERT INTO recipe ({cols}) VALUES ({marks})", tuple(sets.values()))
+    return int(cur.lastrowid)
+
+
+def update_recipe(conn: sqlite3.Connection, recipe_id: int, **fields: Any) -> None:
+    sets = {k: v for k, v in fields.items() if k in _RECIPE_FIELDS and v is not None}
+    if "published" in sets:
+        sets["published"] = int(bool(sets["published"]))
+    if not sets:
+        return
+    clause = ", ".join(f"{k} = ?" for k in sets)
+    with transaction(conn):
+        conn.execute(
+            f"UPDATE recipe SET {clause}, updated_at = datetime('now') WHERE id = ?",
+            (*sets.values(), recipe_id),
+        )
+
+
+def delete_recipe(conn: sqlite3.Connection, recipe_id: int) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM recipe WHERE id = ?", (recipe_id,))
+
+
+def list_recipe_tools(conn: sqlite3.Connection, recipe_id: int) -> list[dict[str, Any]]:
+    return _rows(
+        conn.execute(
+            """
+            SELECT
+                rt.id,
+                rt.recipe_id,
+                rt.server_id,
+                rt.tool_name,
+                rt.ordinal,
+                s.slug AS server_slug,
+                s.name AS server_name
+            FROM recipe_tool rt
+            LEFT JOIN server s ON s.id = rt.server_id
+            WHERE rt.recipe_id = ?
+            ORDER BY rt.ordinal, rt.id
+            """,
+            (recipe_id,),
+        ).fetchall()
+    )
+
+
+def list_recipe_tools_bulk(
+    conn: sqlite3.Connection, recipe_ids: list[int]
+) -> dict[int, list[dict[str, Any]]]:
+    grouped: dict[int, list[dict[str, Any]]] = {recipe_id: [] for recipe_id in recipe_ids}
+    if not recipe_ids:
+        return grouped
+    marks = ", ".join("?" for _ in recipe_ids)
+    rows = _rows(
+        conn.execute(
+            f"""
+            SELECT
+                rt.id,
+                rt.recipe_id,
+                rt.server_id,
+                rt.tool_name,
+                rt.ordinal,
+                s.slug AS server_slug,
+                s.name AS server_name
+            FROM recipe_tool rt
+            LEFT JOIN server s ON s.id = rt.server_id
+            WHERE rt.recipe_id IN ({marks})
+            ORDER BY rt.recipe_id, rt.ordinal, rt.id
+            """,
+            tuple(recipe_ids),
+        ).fetchall()
+    )
+    for row in rows:
+        grouped.setdefault(int(row["recipe_id"]), []).append(row)
+    return grouped
+
+
+def replace_recipe_tools(
+    conn: sqlite3.Connection, recipe_id: int, tools: list[dict[str, Any]]
+) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM recipe_tool WHERE recipe_id = ?", (recipe_id,))
+        for tool in tools:
+            conn.execute(
+                "INSERT INTO recipe_tool (recipe_id, server_id, tool_name, ordinal) "
+                "VALUES (?, ?, ?, ?)",
+                (recipe_id, tool["server_id"], tool["tool_name"], tool.get("ordinal", 0)),
+            )
+
+
+def count_recipes_by_server(conn: sqlite3.Connection) -> dict[int, int]:
+    rows = conn.execute(
+        """
+        SELECT server_id, COUNT(DISTINCT recipe_id) AS recipe_count
+        FROM recipe_tool
+        GROUP BY server_id
+        """
+    ).fetchall()
+    return {int(row["server_id"]): int(row["recipe_count"]) for row in rows}
+
+
 # --- llm endpoint ----------------------------------------------------------
 
 _LLM_FIELDS = {

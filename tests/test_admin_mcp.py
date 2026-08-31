@@ -65,6 +65,17 @@ ALLOWED_GAPS = {
     "parse_expand",
     "available_expands",
     "expand_rows",
+    # Recipe helpers: admin MCP tools for recipes land in Phase R5.
+    "list_recipes",
+    "get_recipe",
+    "get_recipe_by_slug",
+    "create_recipe",
+    "update_recipe",
+    "delete_recipe",
+    "set_recipe_tools",
+    "validate_recipes",
+    "recipe_departments",
+    "recipe_counts_by_server",
 }
 
 

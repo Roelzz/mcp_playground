@@ -90,6 +90,7 @@ class LLMEndpointUpdate(BaseModel):
 
 
 RelationType = Literal["many_to_one", "one_to_one"]
+SkillLevel = Literal["beginner", "intermediate", "advanced"]
 
 
 class RelationshipCreate(BaseModel):
@@ -103,3 +104,38 @@ class RelationshipCreate(BaseModel):
     inverse_expand_name: str | None = None
     required: bool = False
     description: str | None = None
+
+
+class RecipeToolRef(BaseModel):
+    server_id: int
+    tool_name: str = Field(min_length=1, max_length=128)
+
+
+class RecipeCreate(BaseModel):
+    slug: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = ""
+    department: str = ""
+    skill: SkillLevel = "beginner"
+    agent_instructions: str = ""
+    example_prompts: list[str] = Field(default_factory=list)
+    destinations: list[str] = Field(default_factory=list)
+    published: bool = False
+    tools: list[RecipeToolRef] = Field(default_factory=list)
+
+
+class RecipeUpdate(BaseModel):
+    slug: str | None = Field(default=None, min_length=1, max_length=64)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    summary: str | None = None
+    department: str | None = None
+    skill: SkillLevel | None = None
+    agent_instructions: str | None = None
+    example_prompts: list[str] | None = None
+    destinations: list[str] | None = None
+    published: bool | None = None
+    tools: list[RecipeToolRef] | None = None
+
+
+class RecipeToolsPayload(BaseModel):
+    tools: list[RecipeToolRef]
