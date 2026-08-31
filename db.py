@@ -12,6 +12,7 @@ load_dotenv()
 
 SCHEMA_VERSION = 3
 
+_JOURNAL_MODES = {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY"}
 _TX_DEPTH: dict[int, int] = {}
 
 SCHEMA_DDL = """
@@ -179,12 +180,15 @@ def db_path() -> str:
 
 
 def connect(path: str | None = None) -> sqlite3.Connection:
-    """Open a connection with WAL, foreign keys and row access by name."""
+    """Open a connection with configured journaling, foreign keys and row access by name."""
     conn = sqlite3.connect(path or db_path(), check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
+    mode = os.getenv("SQLITE_JOURNAL_MODE", "WAL").strip().upper()
+    if mode not in _JOURNAL_MODES:
+        raise ValueError(f"invalid SQLITE_JOURNAL_MODE: {mode!r}")
+    conn.execute(f"PRAGMA journal_mode = {mode}")
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute(f"PRAGMA busy_timeout = {int(os.getenv('SQLITE_BUSY_TIMEOUT', '5000'))}")
     return conn
 
 

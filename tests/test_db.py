@@ -1,3 +1,4 @@
+import os
 import sqlite3
 
 import pytest
@@ -48,8 +49,9 @@ def test_migration_is_idempotent_across_boots(tmp_path):
     c2.close()
 
 
-def test_wal_and_foreign_keys_enabled(conn):
-    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+def test_journal_mode_and_foreign_keys_enabled(conn):
+    expected = os.getenv("SQLITE_JOURNAL_MODE", "WAL").strip().lower()
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == expected
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 

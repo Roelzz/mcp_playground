@@ -310,6 +310,10 @@ Seed data is an immutable snapshot. Reset to seed restores live data back to the
 
 The Compose setup uses the named Docker volume `playground-data` mounted at `/data`. That is what keeps SQLite data alive across `docker compose restart`, `docker compose down`, and later `docker compose up`. Deleting that volume wipes all definitions, live data, and seed data.
 
+## Deployment
+
+Local container deployment is the quick-start path above: `docker compose up --build` (or `podman compose up --build`) exposes the app on port `2009` and persists SQLite in the `playground-data` volume. Azure deployment uses Container Apps, Azure Files, and a public GHCR image; follow **[AZURE.md](AZURE.md)** before handing URLs to attendees.
+
 ## Development
 
 ```bash
