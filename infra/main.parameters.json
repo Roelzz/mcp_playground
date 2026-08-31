@@ -9,7 +9,7 @@
       "value": "westeurope"
     },
     "containerImage": {
-      "value": "ghcr.io/CHANGEME/agent-integration-playground:latest"
+      "value": "ghcr.io/roelzz/mcp_playground:latest"
     },
     "bootstrapUser": {
       "value": "admin"
