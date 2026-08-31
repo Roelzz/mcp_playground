@@ -44,6 +44,12 @@ EXPECTED_TOOL_NAMES = {
     "update_llm_endpoint",
     "delete_llm_endpoint",
     "set_llm_responses",
+    "list_recipes",
+    "get_recipe",
+    "create_recipe",
+    "update_recipe",
+    "delete_recipe",
+    "set_recipe_tools",
     "call_tool",
     "get_traffic",
     "get_traffic_summary",
@@ -65,17 +71,11 @@ ALLOWED_GAPS = {
     "parse_expand",
     "available_expands",
     "expand_rows",
-    # Recipe helpers: admin MCP tools for recipes land in Phase R5.
-    "list_recipes",
-    "get_recipe",
+    # Recipe helpers that mirror slug lookup, validation, and aggregate API helpers.
     "get_recipe_by_slug",
-    "create_recipe",
-    "update_recipe",
-    "delete_recipe",
-    "set_recipe_tools",
     "validate_recipes",
-    "recipe_departments",
     "recipe_counts_by_server",
+    "recipe_departments",
 }
 
 
@@ -255,6 +255,39 @@ def test_partial_update_server_does_not_blank_other_fields(conn: sqlite3.Connect
     assert updated["slug"] == "partial"
     assert updated["description"] == "Keep this"
     assert updated["auth_mode"] == "api_key"
+
+
+def test_recipe_tools_manage_recipe_lifecycle(conn: sqlite3.Connection) -> None:
+    tools = _tools(conn)
+    server = _create_server(tools, "recipes")
+    dataset = _create_dataset(tools, int(server["id"]), rows=[{"id": 1}])
+    _create_get_endpoint(tools, int(server["id"]), int(dataset["id"]), "list_orders")
+
+    recipe = tools["create_recipe"].fn(
+        slug="order-triage",
+        title="Order triage",
+        department="Operations",
+        skill="beginner",
+        agent_instructions="Use the orders MCP tools.",
+        example_prompts=["Find delayed orders"],
+        destinations=["Copilot Studio"],
+        published=True,
+        tools=[{"server_id": int(server["id"]), "tool_name": "list_orders"}],
+    )
+
+    assert tools["list_recipes"].fn()[0]["slug"] == "order-triage"
+    assert tools["get_recipe"].fn(recipe_id=recipe["id"])["tools"][0]["tool_name"] == "list_orders"
+
+    updated = tools["update_recipe"].fn(recipe_id=recipe["id"], title="Updated triage")
+    assert updated["title"] == "Updated triage"
+
+    tools["set_recipe_tools"].fn(recipe_id=recipe["id"], tools=[])
+    assert tools["get_recipe"].fn(recipe_id=recipe["id"])["tools"] == []
+
+    _assert_confirm_refused(tools["delete_recipe"].fn(recipe_id=recipe["id"]))
+    deleted = tools["delete_recipe"].fn(recipe_id=recipe["id"], confirm=True)
+    assert deleted == {"ok": True, "deleted": True, "recipe_id": recipe["id"]}
+    assert tools["get_recipe"].fn(recipe_id=recipe["id"])["code"] == "not_found"
 
 
 def test_service_functions_have_admin_tools() -> None:

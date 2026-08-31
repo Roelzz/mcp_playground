@@ -3,7 +3,7 @@
 import sqlite3
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 import service
@@ -352,6 +352,23 @@ def get_recipe(
     recipe_id: int, conn: sqlite3.Connection = Conn, _: Principal = Admin
 ) -> dict[str, Any]:
     return _handle(service.get_recipe, conn, recipe_id)
+
+
+@router.get("/recipes/{recipe_id}/handout")
+def get_recipe_handout(
+    recipe_id: int,
+    download: bool = False,
+    conn: sqlite3.Connection = Conn,
+    _: Principal = Admin,
+) -> Response:
+    slug, markdown = _handle(service._build_recipe_handout, conn, recipe_id)
+    if not download:
+        return Response(content=markdown, media_type="text/markdown")
+    return Response(
+        content=markdown,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{slug}.md"'},
+    )
 
 
 @router.patch("/recipes/{recipe_id}")

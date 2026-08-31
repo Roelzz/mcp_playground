@@ -142,6 +142,63 @@ def test_cross_server_recipe_returns_both_server_slugs(
     assert server_slugs == {"orders", "hris"}
 
 
+def test_recipe_handout_contains_recipe_details_and_every_tool(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    orders = _make_server_with_endpoint(conn, "orders", "list_orders")
+    hris = _make_server_with_endpoint(conn, "hris", "list_employees", "/employees")
+    payload = {
+        **_recipe_payload(int(orders["id"])),
+        "agent_instructions": "Line one\nLine two",
+        "tools": [
+            {"server_id": int(orders["id"]), "tool_name": "list_orders"},
+            {"server_id": int(hris["id"]), "tool_name": "list_employees"},
+        ],
+    }
+    recipe = client.post("/api/recipes", json=payload).json()
+
+    response = client.get(f"/api/recipes/{recipe['id']}/handout")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "text/markdown; charset=utf-8"
+    assert "# Triage orders" in response.text
+    assert "**Department:** Operations | **Skill:** intermediate" in response.text
+    assert "```\nLine one\nLine two\n```" in response.text
+    assert "`list_orders` — Orders (`orders`)" in response.text
+    assert "`list_employees` — Hris (`hris`)" in response.text
+
+
+def test_published_recipe_handout_contains_public_url(
+    client: TestClient, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://playground.example/base/")
+    server = _make_server_with_endpoint(conn, "orders")
+    recipe = client.post("/api/recipes", json=_recipe_payload(int(server["id"]))).json()
+
+    response = client.get(f"/api/recipes/{recipe['id']}/handout")
+
+    assert response.status_code == 200, response.text
+    assert "Public recipe: https://playground.example/base/r/triage-orders" in response.text
+
+
+def test_recipe_handout_download_sets_attachment_header(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    server = _make_server_with_endpoint(conn, "orders")
+    recipe = client.post("/api/recipes", json=_recipe_payload(int(server["id"]))).json()
+
+    response = client.get(f"/api/recipes/{recipe['id']}/handout?download=true")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-disposition"] == 'attachment; filename="triage-orders.md"'
+
+
+def test_recipe_handout_unknown_recipe_returns_404(client: TestClient) -> None:
+    response = client.get("/api/recipes/9999/handout")
+
+    assert response.status_code == 404
+
+
 def test_put_tools_replaces_set_and_reassigns_ordinals(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:

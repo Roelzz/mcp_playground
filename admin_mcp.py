@@ -378,6 +378,64 @@ def _set_llm_responses(
     return _call_service(service.set_llm_responses, conn, llm_id, responses)
 
 
+def _list_recipes(conn: sqlite3.Connection, published_only: bool = False) -> Any:
+    return _call_service(service.list_recipes, conn, published_only)
+
+
+def _get_recipe(conn: sqlite3.Connection, recipe_id: int) -> Any:
+    return _call_service(service.get_recipe, conn, recipe_id)
+
+
+def _create_recipe(
+    conn: sqlite3.Connection,
+    slug: str,
+    title: str,
+    summary: str = "",
+    department: str = "",
+    skill: str = "beginner",
+    agent_instructions: str = "",
+    example_prompts: list[str] | None = None,
+    destinations: list[str] | None = None,
+    published: bool = False,
+    tools: list[dict[str, Any]] | None = None,
+) -> Any:
+    return _call_service(
+        service.create_recipe,
+        conn,
+        slug=slug,
+        title=title,
+        summary=summary,
+        department=department,
+        skill=skill,
+        agent_instructions=agent_instructions,
+        example_prompts=example_prompts or [],
+        destinations=destinations or [],
+        published=published,
+        tools=tools or [],
+    )
+
+
+def _update_recipe(conn: sqlite3.Connection, recipe_id: int, **kwargs: Any) -> Any:
+    return _call_service(service.update_recipe, conn, recipe_id, **_supplied(kwargs))
+
+
+def _delete_recipe(
+    conn: sqlite3.Connection, recipe_id: int, confirm: bool = False
+) -> dict[str, Any]:
+    if not confirm:
+        return _confirm_required(f"recipe {recipe_id}")
+    result = _call_service(service.delete_recipe, conn, recipe_id)
+    if _is_error(result):
+        return result
+    return _ok(deleted=True, recipe_id=recipe_id)
+
+
+def _set_recipe_tools(
+    conn: sqlite3.Connection, recipe_id: int, tools: list[dict[str, Any]]
+) -> Any:
+    return _call_service(service.set_recipe_tools, conn, recipe_id, tools)
+
+
 def _call_tool(
     conn: sqlite3.Connection,
     slug: str,
@@ -725,6 +783,71 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
             _param("responses", list[dict[str, Any]], "Response rules to configure."),
         ],
         _set_llm_responses,
+    ),
+    (
+        "list_recipes",
+        "List recipe handouts and their MCP tool references.",
+        [_param("published_only", bool, "Only include published recipes.", False)],
+        _list_recipes,
+    ),
+    (
+        "get_recipe",
+        "Get one recipe handout with its MCP tool references.",
+        [_param("recipe_id", int, "Recipe ID.")],
+        _get_recipe,
+    ),
+    (
+        "create_recipe",
+        "Create a recipe handout for trainer-managed bootcamp instructions.",
+        [
+            _param("slug", str, "URL slug for the recipe."),
+            _param("title", str, "Recipe title."),
+            _param("summary", str, "Short recipe summary.", ""),
+            _param("department", str, "Department or scenario area.", ""),
+            _param("skill", str, "Skill level: beginner, intermediate, or advanced.", "beginner"),
+            _param("agent_instructions", str, "Full Copilot Studio agent instructions.", ""),
+            _param("example_prompts", list[str] | None, "Example prompts for learners.", None),
+            _param("destinations", list[str] | None, "Target platforms or destinations.", None),
+            _param("published", bool, "Whether the recipe has a public page.", False),
+            _param("tools", list[dict[str, Any]] | None, "Recipe MCP tool references.", None),
+        ],
+        _create_recipe,
+    ),
+    (
+        "update_recipe",
+        "Update selected fields on a recipe handout.",
+        [
+            _param("recipe_id", int, "Recipe ID."),
+            _param("slug", str | None, "New URL slug.", None),
+            _param("title", str | None, "New recipe title.", None),
+            _param("summary", str | None, "New recipe summary.", None),
+            _param("department", str | None, "New department or scenario area.", None),
+            _param("skill", str | None, "New skill level.", None),
+            _param("agent_instructions", str | None, "New agent instructions.", None),
+            _param("example_prompts", list[str] | None, "Replacement example prompts.", None),
+            _param("destinations", list[str] | None, "Replacement destinations.", None),
+            _param("published", bool | None, "New published flag.", None),
+            _param("tools", list[dict[str, Any]] | None, "Replacement MCP tool references.", None),
+        ],
+        _update_recipe,
+    ),
+    (
+        "delete_recipe",
+        "Delete a recipe handout and its tool references when confirmed.",
+        [
+            _param("recipe_id", int, "Recipe ID."),
+            _param("confirm", bool, "Set true to delete the recipe.", False),
+        ],
+        _delete_recipe,
+    ),
+    (
+        "set_recipe_tools",
+        "Replace the MCP tool references for a recipe.",
+        [
+            _param("recipe_id", int, "Recipe ID."),
+            _param("tools", list[dict[str, Any]], "Recipe MCP tool references."),
+        ],
+        _set_recipe_tools,
     ),
     (
         "call_tool",

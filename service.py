@@ -897,6 +897,57 @@ def set_recipe_tools(
     return get_recipe(conn, recipe_id)
 
 
+def _fence_for_markdown(value: str) -> str:
+    longest = max((len(match.group(0)) for match in re.finditer(r"`+", value)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def _build_recipe_handout(conn: sqlite3.Connection, recipe_id: int) -> tuple[str, str]:
+    recipe = get_recipe(conn, recipe_id)
+    slug = str(recipe["slug"])
+    lines = [
+        f"# {recipe['title']}",
+        "",
+        f"**Department:** {recipe['department']} | **Skill:** {recipe['skill']}",
+        "",
+        str(recipe.get("summary") or ""),
+        "",
+        (
+            "Use the server URL your trainer gave you. Recipes are shared bootcamp"
+            " instructions, not cloned per team."
+        ),
+    ]
+
+    if recipe["published"]:
+        lines.extend(["", f"Public recipe: {_public_base_url()}/r/{slug}"])
+
+    instructions = str(recipe.get("agent_instructions") or "")
+    fence = _fence_for_markdown(instructions)
+    lines.extend(["", "## Agent instructions", "", fence, instructions, fence])
+
+    lines.extend(["", "## Example prompts", ""])
+    prompts = [str(prompt) for prompt in recipe.get("example_prompts", [])]
+    lines.extend(f"- {prompt}" for prompt in prompts)
+    if not prompts:
+        lines.append("- No example prompts provided.")
+
+    lines.extend(["", "## MCP tools", ""])
+    tools = list(recipe.get("tools", []))
+    for tool in tools:
+        server_name = str(tool.get("server_name") or "Unknown server")
+        server_slug = str(tool.get("server_slug") or "unknown")
+        lines.append(f"- `{tool['tool_name']}` — {server_name} (`{server_slug}`)")
+    if not tools:
+        lines.append("- No MCP tools configured.")
+
+    destinations = [str(destination) for destination in recipe.get("destinations", [])]
+    if destinations:
+        lines.extend(["", "## Destinations", ""])
+        lines.extend(f"- {destination}" for destination in destinations)
+
+    return slug, "\n".join(lines).rstrip() + "\n"
+
+
 def validate_recipes(conn: sqlite3.Connection) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     try:
