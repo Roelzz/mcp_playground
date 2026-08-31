@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -13,6 +14,7 @@ load_dotenv()
 SCHEMA_VERSION = 3
 
 _JOURNAL_MODES = {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY"}
+_VFS_NAMES = {"unix", "unix-dotfile", "unix-excl", "unix-none"}
 _TX_DEPTH: dict[int, int] = {}
 
 SCHEMA_DDL = """
@@ -181,7 +183,19 @@ def db_path() -> str:
 
 def connect(path: str | None = None) -> sqlite3.Connection:
     """Open a connection with configured journaling, foreign keys and row access by name."""
-    conn = sqlite3.connect(path or db_path(), check_same_thread=False)
+    target = path or db_path()
+    # On SMB shares (Azure Files) the default VFS relies on POSIX byte-range locks,
+    # which CIFS handles unreliably: SQLite then fails with "database is locked".
+    # unix-dotfile uses a lock file instead and still allows multiple connections.
+    vfs = os.getenv("SQLITE_VFS", "").strip()
+    if vfs:
+        if vfs not in _VFS_NAMES:
+            raise ValueError(f"invalid SQLITE_VFS: {vfs!r}")
+        conn = sqlite3.connect(
+            f"file:{urllib.parse.quote(target)}?vfs={vfs}", uri=True, check_same_thread=False
+        )
+    else:
+        conn = sqlite3.connect(target, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     mode = os.getenv("SQLITE_JOURNAL_MODE", "WAL").strip().upper()
     if mode not in _JOURNAL_MODES:

@@ -95,6 +95,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $TOKEN" \
 | `PORT` | `2009` | Fixed app port. |
 | `DB_PATH` | `/data/playground.db` | SQLite file on Azure Files. |
 | `SQLITE_JOURNAL_MODE` | `DELETE` | Required on Azure Files/SMB. |
+| `SQLITE_VFS` | `unix-dotfile` | Required on Azure Files/SMB. See below. |
 | `SQLITE_BUSY_TIMEOUT` | `15000` | Gives SQLite more time on network storage. |
 | `PUBLIC_BASE_URL` | `https://<fqdn>` | Public URL used in exports and handouts. |
 | `INSECURE_COOKIES` | `0` | HTTPS is used. |
@@ -105,6 +106,20 @@ curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $TOKEN" \
 ### `SQLITE_JOURNAL_MODE=DELETE`
 
 WAL requires a `-shm` file backed by real `mmap` shared memory. SMB does not support it. WAL on Azure Files produces `database is locked` errors or silent corruption. SQLite's own docs warn against WAL on network filesystems.
+
+### `SQLITE_VFS=unix-dotfile`
+
+Turning WAL off is **not enough**. SQLite's default VFS also uses POSIX byte-range locks for regular journaling, and CIFS/SMB handles those unreliably. The container still crash-looped on `database is locked` inside `init_db()` with `SQLITE_JOURNAL_MODE=DELETE` alone.
+
+The `unix-dotfile` VFS replaces byte-range locks with a lock *file*, which is exactly what network filesystems support. It ships with the stdlib `sqlite3` module — no extra dependency — and is selected through a URI:
+
+```python
+sqlite3.connect(f"file:{path}?vfs=unix-dotfile", uri=True)
+```
+
+**Do not use `PRAGMA locking_mode = EXCLUSIVE` instead.** It was tried and rejected: the app opens multiple concurrent connections (per-request in `auth.get_conn`, plus long-lived ones in `main.py`), so the first connection holds the exclusive lock forever and every later `connect()` fails. `maxReplicas=1` does not help — the contention is inside one process. Ten tests in `tests/test_main_wiring.py` fail immediately under that setting.
+
+Note that WAL is impossible under this VFS (no shared memory), so SQLite silently falls back to another journal mode. Set `SQLITE_JOURNAL_MODE=DELETE` explicitly so the behaviour is intentional rather than accidental.
 
 ### `PUBLIC_BASE_URL`
 
@@ -184,7 +199,7 @@ Then:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `database is locked` | `SQLITE_JOURNAL_MODE` is still `WAL` on Azure Files. | Set `SQLITE_JOURNAL_MODE=DELETE`, deploy while scaled to zero, then restart. |
+| `database is locked` | `SQLITE_JOURNAL_MODE` is still `WAL`, or `SQLITE_VFS` is unset, on Azure Files. | Set `SQLITE_JOURNAL_MODE=DELETE` **and** `SQLITE_VFS=unix-dotfile`, deploy while scaled to zero, then restart. |
 | Permission denied on `/data` | Azure Files mount permissions do not allow writes by non-root user `app`. | Run the `/data` probe from §9. Fix mount options or storage permissions. |
 | Copilot Studio connector test times out | Cold start after scale-to-zero. | Use the bootcamp day runbook in §7. |
 | Connectors point at `localhost` | `PUBLIC_BASE_URL` is wrong. | Set it to `https://<fqdn>` and re-export Swagger. |

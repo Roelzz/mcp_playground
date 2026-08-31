@@ -65,11 +65,9 @@ resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2024-0
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: managedEnvironmentName
   location: location
-  properties: {
-    appLogsConfiguration: {
-      destination: 'none'
-    }
-  }
+  // No appLogsConfiguration on purpose: omitting it keeps logs off and avoids Log Analytics cost.
+  // The API rejects destination: 'none'; the property must be absent instead.
+  properties: {}
 }
 
 resource environmentStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
@@ -133,6 +131,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'SQLITE_JOURNAL_MODE'
               value: 'DELETE'
+            }
+            {
+              // Azure Files is an SMB/CIFS share where POSIX byte-range locks are
+              // unreliable, making SQLite fail with "database is locked". The
+              // unix-dotfile VFS uses a lock file instead and works over SMB.
+              name: 'SQLITE_VFS'
+              value: 'unix-dotfile'
             }
             {
               name: 'SQLITE_BUSY_TIMEOUT'
