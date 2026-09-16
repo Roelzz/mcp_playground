@@ -341,5 +341,24 @@ Then:
 - No automated backups; use export bundles.
 - No custom domain.
 - No staging environment.
-- Revision rollout in single-revision mode briefly starts the new revision before draining the old, so there can momentarily be two SQLite writers. **Deploy while the app is scaled to zero, outside use hours.**
+- Revision rollout in single-revision mode briefly starts the new revision before draining
+  the old, so there can momentarily be two SQLite writers. With `minReplicas: 1` the app is
+  never idle, so **deploy outside use hours** — you can no longer wait for it to scale to zero.
 - Historical logging is disabled to avoid cost.
+- **Every database read costs roughly a second.** Measured against the live app:
+
+  | Request | Time |
+  |---|---|
+  | `/health` (no database) | 68 ms |
+  | `/api/servers` | ~0.9 s |
+  | MCP `tools/list` | ~2.0 s |
+  | MCP `tools/call` | ~2.4 s |
+
+  The network is not the problem — the SMB share is. Every request opens a fresh connection,
+  takes a dotfile lock, and with `DELETE` journaling creates and removes a journal file per
+  transaction, each a round trip to Azure Files. Requests still run in parallel, so a cohort
+  gets through, but every Copilot Studio tool call feels about two seconds slow.
+
+  Accepted for bootcamp use. If it ever needs fixing, the levers are connection reuse instead
+  of a connection per request, `PRAGMA synchronous = NORMAL`, and a larger page cache — all of
+  which touch the transaction and thread-safety logic in `db.py`, so none of them are free.
