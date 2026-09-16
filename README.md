@@ -448,7 +448,7 @@ Two supported targets.
 
 **Local container** — the quick-start path above: `docker compose up --build` (or `podman compose up --build`) exposes the app on port `2009` and persists SQLite in the `playground-data` volume.
 
-**Azure Container Apps** — scale-to-zero, under €1/month, HTTPS with a stable FQDN. Full runbook in **[AZURE.md](AZURE.md)**.
+**Azure Container Apps** — one always-on replica, ~€36/month, HTTPS with a stable FQDN. Pinned warm on purpose so nobody waits out a cold start. Full runbook in **[AZURE.md](AZURE.md)**.
 
 ```mermaid
 flowchart LR
@@ -535,7 +535,7 @@ Recently hardened:
   directly on the loop, so every generated tool is now a coroutine that offloads SQLite work
   to a thread. Verified with 40 concurrent tool calls.
 - `/mcp/{slug}` no longer leaks a SQLite connection per request.
-- Browser sessions live in SQLite, so a scale-to-zero cold start no longer logs everyone out.
+- Browser sessions live in SQLite, so a restart or redeploy no longer logs everyone out.
 - Proxy-mode LLM upstreams are checked against an SSRF guard, at save time and again at
   request time.
 - Per-caller throttling on `/mcp`, `/v1`, `/rest` and `/api`.

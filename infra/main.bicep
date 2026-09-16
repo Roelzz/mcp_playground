@@ -26,6 +26,9 @@ param fileShareQuotaGb int = 5
 @description('Application log level.')
 param logLevel string = 'INFO'
 
+@description('Keep one replica running at all times. Costs roughly EUR 36/month but removes the 15-30s cold start. Set to false between bootcamp seasons to fall back to scale-to-zero.')
+param alwaysOn bool = true
+
 var storageAccountName = take('st${uniqueString(resourceGroup().id)}', 24)
 var fileShareName = 'playground-data'
 var managedEnvironmentName = '${appName}-env'
@@ -205,7 +208,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         }
       ]
       scale: {
-        minReplicas: 0
+        // Pinned warm: a cold start costs 15-30s, which the first attendee of every session
+        // pays and which can trip Copilot Studio's connector timeout. ~EUR 36/month, accepted.
+        // Set to 0 between bootcamp seasons to drop the bill to under EUR 1.
+        minReplicas: alwaysOn ? 1 : 0
         // Correctness constraint: SQLite cannot tolerate a second writer on a network share, so do not increase this.
         maxReplicas: 1
       }

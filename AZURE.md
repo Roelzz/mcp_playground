@@ -34,7 +34,7 @@ az containerapp secret show -n agent-playground -g rg-agent-playground \
 
 This deploys one Azure Container App in Consumption mode:
 
-- Azure Container Apps Consumption, scale-to-zero.
+- Azure Container Apps Consumption, pinned to one always-on replica.
 - `maxReplicas: 1`.
 - One SQLite database on an Azure Files SMB share mounted at `/data`.
 - Container image pulled from a public `ghcr.io` package.
@@ -68,17 +68,23 @@ flowchart LR
 
 | Post | Config | Per month |
 |---|---|---|
-| Container Apps compute | Consumption, 0.5 vCPU / 1 GiB, min=0 | €0 — within free grant |
+| Container Apps compute | Consumption, 0.5 vCPU / 1 GiB, **min=1** | ~€36 — see below |
 | HTTP requests | 2,000,000 free/month | €0 |
 | Azure Files | Standard LRS, ~100 MB | < €0.50 |
 | Log Analytics | disabled | €0 |
 | Container registry | ghcr.io public | €0 |
 | Ingress / public IP / TLS | included | €0 |
-| **Total** | | **< €1/month** |
+| **Total** | | **~€36/month** |
 
-The free Consumption grant is **180,000 vCPU-seconds and 360,000 GiB-seconds per subscription per month**. At 0.5 vCPU / 1 GiB, that is roughly 100 running hours. The grant is **per subscription, not per app**: other Container Apps in the same subscription can consume it first.
+The free Consumption grant is **180,000 vCPU-seconds and 360,000 GiB-seconds per subscription
+per month**. At 0.5 vCPU / 1 GiB that is roughly 100 running hours — enough for a scale-to-zero
+app, nowhere near enough for one that runs 24/7 (~720 h). The grant is **per subscription, not
+per app**: other Container Apps in the same subscription can consume it first.
 
-Running 24/7 without scale-to-zero is roughly 720 h/month, about €36/month. Scale-to-zero is the entire business case.
+The app is deliberately pinned to `min-replicas 1`, so it costs about €36/month instead of
+under €1. That buys away the 15–30s cold start, which otherwise hits the first attendee of
+every session and can trip Copilot Studio's connector timeout. See §7 for the reasoning and
+for how to switch back to the cheap mode.
 
 ## 3. Prerequisites
 
@@ -222,37 +228,35 @@ It changes **only** if the app or the managed environment is deleted and recreat
 >   --set-env-vars RATE_LIMIT_PER_MINUTE_ANON=0
 > ```
 
-Scale-to-zero means the first request after an idle period takes 15–30s.
-
-"Idle" is not a guess. The live scale config is:
+The app is pinned warm. The live scale config is:
 
 ```json
-{"minReplicas": 0, "maxReplicas": 1, "cooldownPeriod": 300, "pollingInterval": 30}
+{"minReplicas": 1, "maxReplicas": 1, "cooldownPeriod": 300, "pollingInterval": 30}
 ```
 
-- `cooldownPeriod: 300` — the replica shuts down 5 minutes after the **last** request, not 5 minutes after it started.
-- `pollingInterval: 30` — KEDA re-evaluates every 30s, so actual shutdown lands somewhere between 300 and 330 seconds.
-- Any request resets the timer. An open SSE connection on `/mcp/...` counts as active traffic, so an attendee with a live MCP session keeps the app warm for everyone.
+`minReplicas: 1` is a deliberate choice, not a leftover. Scale-to-zero costs nothing but
+makes the first request after an idle period take 15–30s, and two things go wrong with that:
 
-Read it back yourself:
+- The first attendee of the day eats the cold start.
+- Copilot Studio's connector timeout can be shorter than the cold start, so the connector
+  test fails while nothing is actually broken.
+
+Running one replica around the clock is roughly 720 vCPU-hours a month — about **€36** —
+which is accepted as the price of never debugging a cold start during a session.
+
+Read the live config back yourself:
 
 ```bash
 az containerapp show -n agent-playground -g rg-agent-playground \
   --query "properties.template.scale" -o json
 ```
 
-Two concrete risks:
-
-- The first attendee of the day eats the cold start.
-- Copilot Studio's connector timeout can be shorter than the cold start. The connector test fails while nothing is actually broken.
-
 ```mermaid
 flowchart LR
-    Zero["💤 0 replicas<br/>€0 · cold"]
-    Warm["⚡ 1 replica<br/>instant response"]
-    Zero -->|"first request<br/>15–30s cold start"| Warm
-    Warm -->|"300s with no traffic"| Zero
-    Warm -->|"any request resets the cooldown"| Warm
+    Warm["⚡ 1 replica, always on<br/>~€36/month · instant response"]
+    Zero["💤 0 replicas<br/>€0 · 15–30s cold start"]
+    Warm -.->|"only if you set --min-replicas 0"| Zero
+    Zero -.->|"first request"| Warm
 
     classDef cold fill:#deecf9,stroke:#0078d4,stroke-width:2px,color:#12232e
     classDef hot fill:#dff6dd,stroke:#107c10,stroke-width:2px,color:#0b2b0b
@@ -260,20 +264,16 @@ flowchart LR
     class Warm hot
 ```
 
-Pin it warm on the day it matters:
+If you ever want the cheap mode back — between bootcamp seasons, say:
 
 ```bash
-# morning of the bootcamp
-az containerapp update -n agent-playground -g rg-agent-playground --min-replicas 1
-
-# after it ends
 az containerapp update -n agent-playground -g rg-agent-playground --min-replicas 0
 ```
 
-Eight hours at `min=1` still fits inside the free grant. Costs nothing, removes the risk on the day it matters.
-
-> [!WARNING]
-> Leaving `min-replicas 1` on burns roughly 720 running hours a month, about €36. Set it back to `0`.
+> [!NOTE]
+> With `minReplicas: 1` there is nothing to do on the morning of a bootcamp. The app is
+> already warm. `cooldownPeriod` and `pollingInterval` no longer have any effect, since
+> the replica never scales in.
 
 ## 8. Migrating existing local data (optional)
 
@@ -328,7 +328,7 @@ Then:
 |---|---|---|
 | `database is locked` | `SQLITE_JOURNAL_MODE` is still `WAL`, or `SQLITE_VFS` is unset, on Azure Files. | Set `SQLITE_JOURNAL_MODE=DELETE` **and** `SQLITE_VFS=unix-dotfile`, deploy while scaled to zero, then restart. |
 | Permission denied on `/data` | Azure Files mount permissions do not allow writes by non-root user `app`. | Run the `/data` probe from §9. Fix mount options or storage permissions. |
-| Copilot Studio connector test times out | Cold start after scale-to-zero. | Use the bootcamp day runbook in §7. |
+| Copilot Studio connector test times out | Cold start, so the app was scaled to zero. | Confirm `minReplicas` is `1` — see §7. |
 | Connectors point at `localhost` | `PUBLIC_BASE_URL` is wrong. | Set it to `https://<fqdn>` and re-export Swagger. |
 | `ImagePullBackOff` | GHCR package is private. | Make the package public in GitHub package settings, then restart the Container App. Public repos publish public packages automatically. |
 | No historical logs | Log Analytics is deliberately disabled. | Live streaming works. Attach a workspace temporarily if historical queries are needed. |
