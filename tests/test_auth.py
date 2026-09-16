@@ -12,7 +12,6 @@ import db
 
 @pytest.fixture(autouse=True)
 def reset_auth_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    auth._SESSIONS.clear()
     auth._LOGIN_FAILURES.clear()
     monkeypatch.delenv("AUTH_DISABLED", raising=False)
     monkeypatch.setenv("INSECURE_COOKIES", "1")
@@ -152,6 +151,44 @@ def test_logout_clears_session(client: TestClient, conn: sqlite3.Connection) -> 
 
     assert logout.status_code == 204, logout.text
     assert client.get("/api/auth/me").status_code == 401
+
+
+def test_session_survives_restart(tmp_path) -> None:
+    db_file = tmp_path / "auth-restart.db"
+    first_conn = db.init_db(str(db_file))
+    token = auth.create_session(first_conn, "admin", "admin")
+    token_hash = auth._hash_session_token(token)
+    first_conn.close()
+
+    second_conn = db.init_db(str(db_file))
+    try:
+        principal = auth.resolve_session(second_conn, token)
+        stored = second_conn.execute("SELECT token_hash FROM session").fetchone()
+    finally:
+        second_conn.close()
+
+    assert principal is not None
+    assert principal.label == "admin"
+    assert principal.scope == "admin"
+    assert stored["token_hash"] == token_hash
+    assert stored["token_hash"] != token
+
+
+def test_expired_session_is_cleaned_up_and_returns_no_principal(
+    conn: sqlite3.Connection,
+) -> None:
+    token = auth.create_session(conn, "admin", "admin")
+    with db.transaction(conn):
+        conn.execute(
+            "UPDATE session SET expires_at = datetime('now', '-1 second') WHERE token_hash = ?",
+            (auth._hash_session_token(token),),
+        )
+
+    principal = auth.resolve_session(conn, token)
+    remaining = conn.execute("SELECT COUNT(*) AS count FROM session").fetchone()
+
+    assert principal is None
+    assert remaining["count"] == 0
 
 
 def test_api_key_auth_works_via_authorization_and_x_api_key(

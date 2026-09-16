@@ -3,13 +3,14 @@
 import os
 import sys
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.routing import get_route_path
 
@@ -19,6 +20,7 @@ import db
 import llm
 import mcp_builder
 import portability
+import ratelimit
 import recipes
 import rest
 import seed
@@ -38,13 +40,17 @@ logger.add(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    db.init_db()
-    logger.info(f"database ready at {db.db_path()}")
-    with db.connect() as conn:
-        if seed.seed_if_empty(conn):
-            logger.info("seeded demo content")
-        auth.bootstrap(conn)
+    await run_in_threadpool(_init_application_db)
     yield
+
+
+def _init_application_db() -> None:
+    with closing(db.init_db()) as conn:
+        seeded = seed.seed_if_empty(conn)
+        auth.bootstrap(conn)
+    logger.info(f"database ready at {db.db_path()}")
+    if seeded:
+        logger.info("seeded demo content")
 
 
 app = FastAPI(
@@ -53,6 +59,8 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(ratelimit.RateLimitMiddleware)
 
 app.include_router(auth.router)
 app.include_router(api.router)
@@ -77,7 +85,7 @@ def _principal_for(conn, scope: dict) -> auth.Principal | None:
 
 async def _dispatch_admin(conn, scope: dict, receive, send) -> None:
     """Serve the management MCP server at /mcp/_admin behind an admin API key."""
-    mcp = build_admin_server(conn)
+    mcp = await run_in_threadpool(build_admin_server, conn)
     mcp.streamable_http_app()
     async with mcp.session_manager.run():
         await mcp.session_manager.handle_request(scope, receive, send)
@@ -86,9 +94,9 @@ async def _dispatch_admin(conn, scope: dict, receive, send) -> None:
 async def mcp_asgi(scope: dict, receive, send) -> None:
     """Raw ASGI entry point for /mcp/{slug} Streamable HTTP transports."""
     slug = get_route_path(scope).lstrip("/").split("/")[0]
-    with db.connect() as conn:
+    with closing(db.connect()) as conn:
         if slug == "_admin":
-            principal = _principal_for(conn, scope)
+            principal = await run_in_threadpool(_principal_for, conn, scope)
             if principal is None:
                 await _unauthorized("admin api key required")(scope, receive, send)
                 return
@@ -101,13 +109,15 @@ async def mcp_asgi(scope: dict, receive, send) -> None:
             return
 
         try:
-            server = service.get_server_by_slug(conn, slug)
+            server = await run_in_threadpool(service.get_server_by_slug, conn, slug)
         except service.NotFound:
             await PlainTextResponse(f"unknown mcp server: {slug}", status_code=404)(
                 scope, receive, send
             )
             return
-        if server.get("auth_mode") == "api_key" and _principal_for(conn, scope) is None:
+        if server.get("auth_mode") == "api_key" and (
+            await run_in_threadpool(_principal_for, conn, scope)
+        ) is None:
             await _unauthorized(f"api key required for mcp server: {slug}")(scope, receive, send)
             return
         await mcp_builder.dispatch(conn, slug, scope, receive, send)

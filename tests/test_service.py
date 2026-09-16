@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 
 import db
+import netguard
 import service
 import store
 
@@ -289,6 +290,29 @@ def test_proxy_llm_requires_upstream_url_but_mock_does_not(conn) -> None:
 
     llm = service.create_llm_endpoint(conn, slug="mock", name="Mock", mode="mock")
     assert llm["slug"] == "mock"
+
+
+def test_proxy_llm_rejects_blocked_upstream_on_save(
+    conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        netguard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (netguard.socket.AF_INET, netguard.socket.SOCK_STREAM, 0, "", ("127.0.0.1", 80))
+        ],
+    )
+
+    with pytest.raises(service.ServiceError) as exc:
+        service.create_llm_endpoint(
+            conn,
+            slug="proxy",
+            name="Proxy",
+            mode="proxy",
+            upstream_url="http://localhost:2009/v1/chat/completions",
+        )
+
+    assert "blocked upstream_url" in exc.value.message
 
 
 def test_set_llm_responses_defaults_match_type_to_always(conn) -> None:

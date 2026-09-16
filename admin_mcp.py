@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import sqlite3
@@ -11,6 +12,7 @@ from typing import Annotated, Any
 from loguru import logger
 from mcp.server import FastMCP
 from pydantic import Field
+from starlette.concurrency import run_in_threadpool
 
 import auth
 import portability
@@ -68,16 +70,18 @@ def _param(name: str, py_type: Any, description: str, default: Any = REQUIRED) -
 
 def _make_tool(
     conn: sqlite3.Connection,
+    db_lock: asyncio.Lock,
     tool_name: str,
     description: str,
     params: list[ParamSpec],
     handler: Handler,
 ) -> Callable[..., Any]:
-    def impl(**kwargs: Any) -> Any:
+    async def impl(**kwargs: Any) -> Any:
         logger.info(f"admin mcp tool invoked: {tool_name}")
         bound = signature.bind(**kwargs)
         bound.apply_defaults()
-        return handler(conn, **bound.arguments)
+        async with db_lock:
+            return await run_in_threadpool(handler, conn, **bound.arguments)
 
     signature_params = []
     annotations: dict[str, Any] = {}
@@ -1086,6 +1090,7 @@ TOOL_SPECS: list[tuple[str, str, list[ParamSpec], Handler]] = [
 
 def build_admin_server(conn: sqlite3.Connection) -> FastMCP:
     """Build the stateless management MCP server for MCP Playground."""
+    db_lock = asyncio.Lock()
     mcp = FastMCP(
         name="MCP Playground Admin",
         instructions=ADMIN_INSTRUCTIONS,
@@ -1094,7 +1099,7 @@ def build_admin_server(conn: sqlite3.Connection) -> FastMCP:
     )
 
     for name, description, params, handler in TOOL_SPECS:
-        mcp.add_tool(_make_tool(conn, name, description, params, handler))
+        mcp.add_tool(_make_tool(conn, db_lock, name, description, params, handler))
 
     logger.debug(f"built admin mcp server with {len(mcp._tool_manager._tools)} tools")
     return mcp

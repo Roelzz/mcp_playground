@@ -13,6 +13,7 @@ from typing import Any
 from loguru import logger
 
 import executor
+import netguard
 import store
 from db import transaction
 
@@ -661,6 +662,11 @@ def get_llm_endpoint_by_slug(conn: sqlite3.Connection, slug: str) -> dict[str, A
 def _validate_llm_fields(mode: str | None, upstream_url: str | None) -> None:
     if mode == "proxy" and not upstream_url:
         raise ServiceError("proxy mode requires an upstream_url")
+    if mode == "proxy" and upstream_url:
+        try:
+            netguard.validate_upstream_url(upstream_url)
+        except netguard.UpstreamURLBlockedError as exc:
+            raise ServiceError(f"blocked upstream_url: {exc}") from exc
 
 
 def create_llm_endpoint(conn: sqlite3.Connection, **fields: Any) -> dict[str, Any]:
@@ -683,10 +689,11 @@ def update_llm_endpoint(conn: sqlite3.Connection, llm_id: int, **fields: Any) ->
         existing = store.get_llm_endpoint_by_slug(conn, slug)
         if existing is not None and existing["id"] != llm_id:
             raise Conflict(f"llm endpoint slug {slug!r} already exists")
-    _validate_llm_fields(
-        fields.get("mode") or llm["mode"],
-        fields.get("upstream_url") or llm["upstream_url"],
+    merged_mode = fields["mode"] if "mode" in fields else llm["mode"]
+    merged_upstream_url = (
+        fields["upstream_url"] if "upstream_url" in fields else llm["upstream_url"]
     )
+    _validate_llm_fields(merged_mode, merged_upstream_url)
     with transaction(conn):
         store.update_llm_endpoint(conn, llm_id, **fields)
     return get_llm_endpoint(conn, llm_id)

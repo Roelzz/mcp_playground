@@ -1,5 +1,8 @@
+import asyncio
+import inspect
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,12 @@ def test_build_server_exposes_every_endpoint_as_a_tool(conn: sqlite3.Connection)
         "delete_order",
         "list_order_lines",
     }
+
+
+def test_fastmcp_marks_generated_tools_async(conn: sqlite3.Connection) -> None:
+    tool = _tools(conn)["list_orders"]
+    assert inspect.iscoroutinefunction(tool.fn)
+    assert tool.is_async is True
 
 
 def test_build_server_rejects_unknown_slug(conn: sqlite3.Connection) -> None:
@@ -74,7 +83,47 @@ def test_create_tool_has_no_required_params(conn: sqlite3.Connection) -> None:
 
 
 def _call(conn: sqlite3.Connection, name: str, args: dict[str, Any]) -> Any:
-    return _tools(conn)[name].fn(**args)
+    return asyncio.run(_tools(conn)[name].fn(**args))
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_do_not_block_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_file = tmp_path / "concurrency.db"
+    setup_conn = db.init_db(str(db_file))
+    try:
+        seed.seed_if_empty(setup_conn)
+    finally:
+        setup_conn.close()
+
+    conns = [db.connect(str(db_file)), db.connect(str(db_file))]
+
+    def slow_call_tool(
+        _conn: sqlite3.Connection,
+        _slug: str,
+        tool_name: str,
+        _params: dict[str, Any],
+    ) -> dict[str, str]:
+        time.sleep(0.4)
+        return {"tool": tool_name}
+
+    monkeypatch.setattr(service, "call_tool", slow_call_tool)
+    try:
+        tools = [
+            mcp_builder.build_server(test_conn, "contoso-orders")._tool_manager._tools[
+                "list_orders"
+            ]
+            for test_conn in conns
+        ]
+        started = time.perf_counter()
+        results = await asyncio.gather(*(tool.run({"limit": 1}) for tool in tools))
+    finally:
+        for test_conn in conns:
+            test_conn.close()
+
+    assert results == [{"tool": "list_orders"}, {"tool": "list_orders"}]
+    assert time.perf_counter() - started < 0.7
 
 
 def test_get_tool_returns_the_row(conn: sqlite3.Connection) -> None:

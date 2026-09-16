@@ -529,7 +529,20 @@ upstream instead of a public mirror.
 
 Azure deployment shipped — see [AZURE.md](AZURE.md). Nothing is currently blocking a bootcamp.
 
+Recently hardened:
+
+- Tool calls no longer block the event loop. The MCP SDK calls synchronous tool functions
+  directly on the loop, so every generated tool is now a coroutine that offloads SQLite work
+  to a thread. Verified with 40 concurrent tool calls.
+- `/mcp/{slug}` no longer leaks a SQLite connection per request.
+- Browser sessions live in SQLite, so a scale-to-zero cold start no longer logs everyone out.
+- Proxy-mode LLM upstreams are checked against an SSRF guard, at save time and again at
+  request time.
+- Per-caller throttling on `/mcp`, `/v1`, `/rest` and `/api`.
+- A WAL database is converted automatically when the `unix-dotfile` VFS is configured.
+
 Untested rather than broken, worth knowing before a large session:
 
-- No load test against a full 200-attendee cohort yet.
+- No load test against a full 200-attendee cohort yet. Verified at 20 concurrent callers.
 - SQLite lock behaviour after a hard container kill (not a graceful restart) is unverified.
+- Participants share one dataset per server: a `reset` by one attendee affects everyone.

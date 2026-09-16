@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 import sqlite3
@@ -11,6 +12,7 @@ from typing import Annotated, Any
 from loguru import logger
 from mcp.server import FastMCP
 from pydantic import Field
+from starlette.concurrency import run_in_threadpool
 
 import executor
 import service
@@ -104,14 +106,16 @@ def _tool_params(
 
 def _make_tool(
     conn: sqlite3.Connection,
+    db_lock: asyncio.Lock,
     slug: str,
     tool_name: str,
     description: str,
     params: list[tuple[str, type, str, Any]],
 ) -> Callable[..., Any]:
-    def impl(**kwargs: Any) -> Any:
+    async def impl(**kwargs: Any) -> Any:
         supplied = {key: value for key, value in kwargs.items() if value is not None}
-        return service.call_tool(conn, slug, tool_name, supplied)
+        async with db_lock:
+            return await run_in_threadpool(service.call_tool, conn, slug, tool_name, supplied)
 
     signature_params = []
     annotations: dict[str, Any] = {}
@@ -137,6 +141,7 @@ def _make_tool(
 def build_server(conn: sqlite3.Connection, slug: str) -> FastMCP:
     """Build a stateless FastMCP server exposing every endpoint of `slug` as a tool."""
     server_row = service.get_server_by_slug(conn, slug)
+    db_lock = asyncio.Lock()
     mcp = FastMCP(
         name=server_row["name"] or slug,
         instructions=server_row["description"] or "",
@@ -164,6 +169,7 @@ def build_server(conn: sqlite3.Connection, slug: str) -> FastMCP:
         mcp.add_tool(
             _make_tool(
                 conn,
+                db_lock,
                 slug,
                 str(endpoint["tool_name"]),
                 description,
@@ -187,7 +193,7 @@ async def dispatch(
     Building per request keeps tools in sync with edits and avoids relying on an
     application lifespan that a lazily created sub-app never participates in.
     """
-    mcp = build_server(conn, slug)
+    mcp = await run_in_threadpool(build_server, conn, slug)
     mcp.streamable_http_app()
     async with mcp.session_manager.run():
         await mcp.session_manager.handle_request(scope, receive, send)

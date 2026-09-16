@@ -12,9 +12,11 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 import auth
+import netguard
 import service
 import store
 
@@ -193,10 +195,19 @@ def _proxy_target(llm: dict[str, Any]) -> tuple[str, dict[str, str]]:
             "/chat/completions?api-version=2024-10-21"
         )
         headers["api-key"] = upstream_key
+        _validate_proxy_target(url)
         return url, headers
 
     headers["Authorization"] = f"Bearer {upstream_key}"
+    _validate_proxy_target(upstream_url)
     return upstream_url, headers
+
+
+def _validate_proxy_target(url: str) -> None:
+    try:
+        netguard.validate_upstream_url(url)
+    except netguard.UpstreamURLBlockedError as exc:
+        raise HTTPException(status_code=400, detail=f"blocked upstream_url: {exc}") from exc
 
 
 def _proxy_payload(llm: dict[str, Any], body: ChatCompletionRequest) -> dict[str, Any]:
@@ -222,7 +233,7 @@ async def _proxy_completion(
     url, headers = _proxy_target(llm)
     payload = _proxy_payload(llm, body)
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
             response = await client.post(url, headers=headers, json=payload)
     except httpx.TimeoutException as exc:
         raise HTTPException(status_code=502, detail="upstream request timed out") from exc
@@ -245,7 +256,7 @@ async def _proxy_completion(
 async def _proxy_stream(llm: dict[str, Any], body: ChatCompletionRequest) -> StreamingResponse:
     url, headers = _proxy_target(llm)
     payload = _proxy_payload(llm, body)
-    client = httpx.AsyncClient(timeout=60.0)
+    client = httpx.AsyncClient(timeout=60.0, follow_redirects=False)
     request = client.build_request("POST", url, headers=headers, json=payload)
     try:
         response = await client.send(request, stream=True)
@@ -324,6 +335,49 @@ def _log_llm(
     )
 
 
+def _get_llm_or_log_not_found(
+    conn: sqlite3.Connection,
+    slug: str,
+    started: float,
+    request_log: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        return _handle(service.get_llm_endpoint_by_slug, conn, slug)
+    except HTTPException as exc:
+        _log_llm(conn, slug, started, "not_found", request_log, {"error": exc.detail})
+        raise
+
+
+def _require_llm_auth_or_log(
+    request: Request,
+    conn: sqlite3.Connection,
+    llm: dict[str, Any],
+    slug: str,
+    started: float,
+    request_log: dict[str, Any],
+) -> None:
+    try:
+        _require_endpoint_auth(request, conn, llm)
+    except HTTPException as exc:
+        _log_llm(conn, slug, started, "unauthorized", request_log, {"error": exc.detail})
+        raise
+
+
+def _prepare_mock_completion(
+    conn: sqlite3.Connection,
+    slug: str,
+    llm_id: int,
+    body: ChatCompletionRequest,
+    started: float,
+    request_log: dict[str, Any],
+) -> tuple[dict[str, Any], str, str, bool]:
+    llm = _handle(service.get_llm_endpoint, conn, llm_id)
+    probe = _probe_from_messages(body.messages)
+    text, matched = _mock_response(slug, llm["responses"], probe)
+    _log_llm(conn, slug, started, "ok", request_log, {"text": text, "rule_matched": matched})
+    return llm, probe, text, matched
+
+
 @router.post("/{slug}/chat/completions", response_model=None)
 async def chat_completions(
     slug: str,
@@ -333,27 +387,24 @@ async def chat_completions(
 ) -> dict[str, Any] | Response:
     started = time.perf_counter()
     logged = {"model": body.model, "stream": body.stream, "messages": body.messages}
-    try:
-        llm = _handle(service.get_llm_endpoint_by_slug, conn, slug)
-    except HTTPException as exc:
-        _log_llm(conn, slug, started, "not_found", logged, {"error": exc.detail})
-        raise
-    try:
-        _require_endpoint_auth(request, conn, llm)
-    except HTTPException as exc:
-        _log_llm(conn, slug, started, "unauthorized", logged, {"error": exc.detail})
-        raise
+    llm = await run_in_threadpool(_get_llm_or_log_not_found, conn, slug, started, logged)
+    await run_in_threadpool(_require_llm_auth_or_log, request, conn, llm, slug, started, logged)
     matched = False
 
     if llm["mode"] == "mock":
-        llm = _handle(service.get_llm_endpoint, conn, llm["id"])
-        probe = _probe_from_messages(body.messages)
-        text, matched = _mock_response(slug, llm["responses"], probe)
+        llm, probe, text, matched = await run_in_threadpool(
+            _prepare_mock_completion,
+            conn,
+            slug,
+            int(llm["id"]),
+            body,
+            started,
+            logged,
+        )
         logger.info(
             f"llm completion slug={slug!r} mode={llm['mode']!r} "
             f"stream={body.stream} rule_matched={matched}"
         )
-        _log_llm(conn, slug, started, "ok", logged, {"text": text, "rule_matched": matched})
         if body.stream:
             return StreamingResponse(
                 _mock_stream(llm["model_name"], text),
@@ -368,11 +419,17 @@ async def chat_completions(
     try:
         if body.stream:
             result = await _proxy_stream(llm, body)
-            _log_llm(conn, slug, started, "ok", logged, {"proxy": "stream"})
+            await run_in_threadpool(
+                _log_llm, conn, slug, started, "ok", logged, {"proxy": "stream"}
+            )
             return result
         result = await _proxy_completion(llm, body)
-        _log_llm(conn, slug, started, "ok", logged, {"proxy": "completion"})
+        await run_in_threadpool(
+            _log_llm, conn, slug, started, "ok", logged, {"proxy": "completion"}
+        )
         return result
     except HTTPException as exc:
-        _log_llm(conn, slug, started, str(exc.status_code), logged, {"error": exc.detail})
+        await run_in_threadpool(
+            _log_llm, conn, slug, started, str(exc.status_code), logged, {"error": exc.detail}
+        )
         raise

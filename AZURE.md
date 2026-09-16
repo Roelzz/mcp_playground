@@ -168,6 +168,12 @@ The two halves are independent: Actions only produces an image, `deploy.sh` only
 | `LOG_LEVEL` | `INFO` | Default production logging. |
 | `BOOTSTRAP_USER` | `admin` | Initial admin username. |
 | `BOOTSTRAP_PASSWORD` | ACA secret | Initial admin password. |
+| `SESSION_TTL_HOURS` | `12` | How long a browser login stays valid. |
+| `RATE_LIMIT_PER_MINUTE` | `300` | Per-caller throttle for API-key and cookie callers. `0` disables. |
+| `RATE_LIMIT_PER_MINUTE_ANON` | `6000` | Throttle for callers identified only by IP. See the warning in §7. |
+| `ALLOW_PRIVATE_UPSTREAM` | unset | **Never set this in Azure.** It disables the SSRF guard on private addresses. |
+| `UPSTREAM_ALLOWLIST` | unset | Optional comma-separated hosts allowed as proxy upstreams. |
+| `AUTH_DISABLED` | unset | **Never set this in Azure.** Local development only. |
 
 ### `SQLITE_JOURNAL_MODE=DELETE`
 
@@ -203,6 +209,18 @@ It changes **only** if the app or the managed environment is deleted and recreat
 > `teardown.sh` is irreversible in a way that matters. It deletes the managed environment. A rebuild gets a different URL, and every URL already handed to 200 attendees breaks.
 
 ## 7. Bootcamp day runbook
+
+> [!WARNING]
+> Attendees reach the seeded servers through Copilot Studio, which calls out from a small
+> pool of shared Microsoft egress addresses. Because those servers run `auth_mode: none`,
+> every attendee lands in the **same** IP rate-limit bucket. That is why
+> `RATE_LIMIT_PER_MINUTE_ANON` defaults to `6000` rather than `300`. If a cohort ever sees
+> `429 rate limit exceeded`, raise it or set it to `0` for the day:
+>
+> ```bash
+> az containerapp update -n agent-playground -g rg-agent-playground \
+>   --set-env-vars RATE_LIMIT_PER_MINUTE_ANON=0
+> ```
 
 Scale-to-zero means the first request after an idle period takes 15–30s.
 
@@ -269,8 +287,15 @@ sqlite3 playground.db "PRAGMA journal_mode = DELETE;"
 az storage file upload --share-name playground-data --source playground.db --account-name <storage> --path playground.db
 ```
 
-Simpler alternative: upload nothing. A fresh volume self-seeds through the app lifespan: `init_db` → `seed_if_empty` → `auth.bootstrap`. Then author through the admin UI or the 57 admin MCP tools.
+> [!NOTE]
+> Forgetting the `journal_mode = DELETE` step used to break the boot with a bare
+> `sqlite3.OperationalError: unable to open database file`. WAL needs mmap-backed shared
+> memory that the `unix-dotfile` VFS cannot provide, so the file simply will not open.
+> `db.ensure_journal_compatible()` now runs once at startup, converts a WAL database to
+> `DELETE` and logs a warning. Committed data survives, because converting checkpoints the
+> `-wal` file first. The explicit steps above are still the tidier path.
 
+Simpler alternative: upload nothing. A fresh volume self-seeds through the app lifespan: `init_db` → `seed_if_empty` → `auth.bootstrap`. Then author through the admin UI or the 57 admin MCP tools.
 For a fresh bootcamp, that is probably better.
 
 `portability.py` export/import bundles are the actual backup/DR strategy. There are no automated Azure backups.

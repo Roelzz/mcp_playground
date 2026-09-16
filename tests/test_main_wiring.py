@@ -6,6 +6,9 @@ surface is not mounted; we assert that it is NOT 404 (or check the exact code
 where it is predictable and stable).
 """
 
+import sqlite3
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -76,6 +79,40 @@ def test_mcp_server_route_is_mounted(client: TestClient) -> None:
     assert r.status_code != 404
 
 
+class _CountingConnection:
+    def __init__(self, conn: sqlite3.Connection, counts: dict[str, int]) -> None:
+        self._conn = conn
+        self._counts = counts
+        self._closed = False
+        counts["opened"] += 1
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._counts["closed"] += 1
+        self._conn.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+def test_mcp_server_route_closes_opened_connections(tmp_path, monkeypatch) -> None:
+    counts = {"opened": 0, "closed": 0}
+    original_connect = main.db.connect
+
+    def counted_connect(path: str | None = None) -> _CountingConnection:
+        return _CountingConnection(original_connect(path), counts)
+
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "no-leak.db"))
+    monkeypatch.setattr(main.db, "connect", counted_connect)
+    with TestClient(main.app, raise_server_exceptions=False) as c:
+        r = c.post("/mcp/contoso-orders")
+        assert r.status_code != 404
+
+    assert counts["opened"] == counts["closed"]
+    assert counts["opened"] >= 2
+
+
 # ── Management MCP ────────────────────────────────────────────────────────────
 
 
@@ -105,3 +142,26 @@ def test_llm_chat_completions_handles_valid_request(client: TestClient) -> None:
     body = r.json()
     assert body["object"] == "chat.completion"
     assert body["choices"][0]["message"]["role"] == "assistant"
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+
+def test_rate_limit_middleware_guards_participant_surfaces(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "2")
+    headers = {"X-API-Key": "throttle-me"}
+
+    assert client.get("/api/servers", headers=headers).status_code != 429
+    assert client.get("/api/servers", headers=headers).status_code != 429
+
+    limited = client.get("/api/servers", headers=headers)
+    assert limited.status_code == 429
+    assert int(limited.headers["Retry-After"]) >= 1
+
+
+def test_rate_limit_leaves_health_and_ui_alone(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "1")
+    for _ in range(4):
+        assert client.get("/health").status_code == 200

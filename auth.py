@@ -25,7 +25,6 @@ HASH_BYTES = 32
 LOCKOUT_WINDOW_SECONDS = 60
 LOCKOUT_FAILURES = 5
 
-_SESSIONS: dict[str, dict[str, Any]] = {}
 _LOGIN_FAILURES: dict[str, list[float]] = {}
 
 Scope = Literal["admin", "readonly"]
@@ -112,28 +111,54 @@ def _session_ttl_seconds() -> int:
     return int(hours * 3600)
 
 
-def create_session(username: str, scope: str = "admin") -> str:
+def _hash_session_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def cleanup_expired_sessions(conn: sqlite3.Connection) -> int:
+    with db.transaction(conn):
+        cursor = conn.execute("DELETE FROM session WHERE expires_at <= datetime('now')")
+    return cursor.rowcount
+
+
+def create_session(conn: sqlite3.Connection, username: str, scope: str = "admin") -> str:
     token = secrets.token_urlsafe(32)
-    _SESSIONS[token] = {
-        "username": username,
-        "scope": scope,
-        "expires_at": time.time() + _session_ttl_seconds(),
-    }
+    ttl_seconds = _session_ttl_seconds()
+    with db.transaction(conn):
+        conn.execute(
+            """
+            INSERT INTO session (token_hash, username, scope, expires_at)
+            VALUES (?, ?, ?, datetime('now', ?))
+            """,
+            (_hash_session_token(token), username, scope, f"+{ttl_seconds} seconds"),
+        )
     return token
 
 
-def resolve_session(token: str) -> Principal | None:
-    session = _SESSIONS.get(token)
-    if session is None:
-        return None
-    if float(session["expires_at"]) <= time.time():
-        destroy_session(token)
-        return None
-    return Principal(label=str(session["username"]), scope=str(session["scope"]))
+def resolve_session(conn: sqlite3.Connection, token: str) -> Principal | None:
+    token_hash = _hash_session_token(token)
+    row = conn.execute(
+        """
+        SELECT username, scope
+        FROM session
+        WHERE token_hash = ? AND expires_at > datetime('now')
+        """,
+        (token_hash,),
+    ).fetchone()
+    if row is not None:
+        return Principal(label=row["username"], scope=row["scope"])
+
+    with db.transaction(conn):
+        conn.execute(
+            "DELETE FROM session WHERE token_hash = ? AND expires_at <= datetime('now')",
+            (token_hash,),
+        )
+    return None
 
 
-def destroy_session(token: str) -> None:
-    _SESSIONS.pop(token, None)
+def destroy_session(conn: sqlite3.Connection, token: str) -> None:
+    with db.transaction(conn):
+        conn.execute("DELETE FROM session WHERE token_hash = ?", (_hash_session_token(token),))
 
 
 def bootstrap(conn: sqlite3.Connection) -> None:
@@ -228,7 +253,7 @@ async def require_admin(request: Request, conn: sqlite3.Connection = ConnDep) ->
 
     session_token = request.cookies.get(SESSION_COOKIE)
     if session_token is not None:
-        principal = resolve_session(session_token)
+        principal = resolve_session(conn, session_token)
         if principal is not None:
             return _remember_principal(request, principal)
 
@@ -287,6 +312,7 @@ router = APIRouter(prefix="/api", tags=["auth"])
 def login(
     body: LoginRequest, response: Response, conn: sqlite3.Connection = ConnDep
 ) -> dict[str, str]:
+    cleanup_expired_sessions(conn)
     _enforce_login_lockout(body.username)
     row = conn.execute(
         "SELECT username, password_hash FROM admin_user WHERE username = ?",
@@ -298,7 +324,7 @@ def login(
         raise HTTPException(status_code=401, detail="invalid username or password")
 
     _clear_failed_logins(body.username)
-    token = create_session(row["username"], "admin")
+    token = create_session(conn, row["username"], "admin")
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
@@ -312,10 +338,12 @@ def login(
 
 
 @router.post("/auth/logout", status_code=204)
-def logout(request: Request, response: Response) -> None:
+def logout(
+    request: Request, response: Response, conn: sqlite3.Connection = ConnDep
+) -> None:
     token = request.cookies.get(SESSION_COOKIE)
     if token is not None:
-        destroy_session(token)
+        destroy_session(conn, token)
     response.delete_cookie(
         key=SESSION_COOKIE,
         httponly=True,

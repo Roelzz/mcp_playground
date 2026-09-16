@@ -1,3 +1,4 @@
+import contextlib
 import sqlite3
 
 import pytest
@@ -180,3 +181,66 @@ def test_wal_is_impossible_under_dotfile_vfs(tmp_path, monkeypatch):
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal"
     finally:
         conn.close()
+
+
+# ── WAL -> dotfile VFS migration ──────────────────────────────────────────────
+
+
+def _make_wal_db(path) -> None:
+    with contextlib.closing(sqlite3.connect(str(path))) as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("CREATE TABLE keep (value TEXT)")
+        conn.execute("INSERT INTO keep (value) VALUES ('precious')")
+        conn.commit()
+
+
+def test_wal_database_cannot_be_opened_by_dotfile_vfs(tmp_path, monkeypatch):
+    """Guards the assumption behind ensure_journal_compatible()."""
+    target = tmp_path / "wal.db"
+    _make_wal_db(target)
+
+    monkeypatch.setenv("SQLITE_VFS", "unix-dotfile")
+    monkeypatch.setenv("SQLITE_JOURNAL_MODE", "DELETE")
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        db.connect(str(target))
+
+
+def test_ensure_journal_compatible_converts_wal_and_keeps_data(tmp_path, monkeypatch):
+    target = tmp_path / "wal.db"
+    _make_wal_db(target)
+
+    monkeypatch.setenv("SQLITE_VFS", "unix-dotfile")
+    monkeypatch.setenv("SQLITE_JOURNAL_MODE", "DELETE")
+    assert db.ensure_journal_compatible(str(target)) == "DELETE"
+
+    with contextlib.closing(db.connect(str(target))) as conn:
+        assert conn.execute("SELECT value FROM keep").fetchone()[0] == "precious"
+
+
+def test_init_db_recovers_a_wal_database_on_dotfile_vfs(tmp_path, monkeypatch):
+    target = tmp_path / "wal.db"
+    _make_wal_db(target)
+
+    monkeypatch.setenv("SQLITE_VFS", "unix-dotfile")
+    monkeypatch.setenv("SQLITE_JOURNAL_MODE", "DELETE")
+    with contextlib.closing(db.init_db(str(target))) as conn:
+        assert conn.execute("SELECT value FROM keep").fetchone()[0] == "precious"
+        assert db.current_version(conn) == db.SCHEMA_VERSION
+
+
+def test_ensure_journal_compatible_is_a_noop_without_vfs(tmp_path, monkeypatch):
+    target = tmp_path / "wal.db"
+    _make_wal_db(target)
+
+    monkeypatch.delenv("SQLITE_VFS", raising=False)
+    monkeypatch.setenv("SQLITE_JOURNAL_MODE", "WAL")
+    assert db.ensure_journal_compatible(str(target)) is None
+
+    with contextlib.closing(sqlite3.connect(str(target))) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+
+def test_ensure_journal_compatible_ignores_a_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQLITE_VFS", "unix-dotfile")
+    monkeypatch.setenv("SQLITE_JOURNAL_MODE", "DELETE")
+    assert db.ensure_journal_compatible(str(tmp_path / "absent.db")) is None

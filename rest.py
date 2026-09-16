@@ -6,6 +6,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 import auth
 import service
@@ -30,13 +31,38 @@ STATUS_BY_TOOL_TYPE = {
     include_in_schema=False,
 )
 async def handle(slug: str, rest_path: str, request: Request, conn: Conn) -> Response:
+    body_params = await _body_params(request)
+    if isinstance(body_params, JSONResponse):
+        return body_params
+    return await run_in_threadpool(
+        _handle_sync,
+        slug,
+        rest_path,
+        request.method,
+        dict(request.query_params),
+        request.query_params.getlist("expand"),
+        auth._request_api_key(request),
+        body_params,
+        conn,
+    )
+
+
+def _handle_sync(
+    slug: str,
+    rest_path: str,
+    method: str,
+    query_params: dict[str, str],
+    expand_list: list[str],
+    api_key: str | None,
+    body_params: dict[str, Any],
+    conn: sqlite3.Connection,
+) -> Response:
     try:
         server = service.get_server_by_slug(conn, slug)
     except service.ServiceError as exc:
         return _service_error_response(exc)
 
-    key = auth._request_api_key(request)
-    principal = auth._resolve_api_key(conn, key) if key is not None else None
+    principal = auth._resolve_api_key(conn, api_key) if api_key is not None else None
     if server.get("auth_mode") == "api_key" and principal is None:
         return JSONResponse(
             {"detail": f"api key required for mock server: {slug}"},
@@ -50,21 +76,17 @@ async def handle(slug: str, rest_path: str, request: Request, conn: Conn) -> Res
         return _service_error_response(exc)
 
     request_path = _normalise_request_path(rest_path)
-    match = _best_endpoint_match(endpoints, request.method, request_path)
+    match = _best_endpoint_match(endpoints, method, request_path)
     if match is None:
         return JSONResponse(
-            {"detail": f"no mock endpoint for {request.method.upper()} {request_path}"},
+            {"detail": f"no mock endpoint for {method.upper()} {request_path}"},
             status_code=404,
         )
 
     endpoint, path_params = match
-    body_params = await _body_params(request)
-    if isinstance(body_params, JSONResponse):
-        return body_params
 
-    merged = {**dict(request.query_params), **body_params, **path_params}
+    merged = {**query_params, **body_params, **path_params}
     # Support ?expand=a&expand=b (repeated key) in addition to ?expand=a,b.
-    expand_list = request.query_params.getlist("expand")
     if len(expand_list) > 1:
         merged["expand"] = expand_list
     params = {key: value for key, value in merged.items() if value is not None}
@@ -76,7 +98,7 @@ async def handle(slug: str, rest_path: str, request: Request, conn: Conn) -> Res
             str(endpoint["tool_name"]),
             params,
             kind="rest",
-            actor=principal.label if key is not None and principal is not None else None,
+            actor=principal.label if api_key is not None and principal is not None else None,
         )
     except service.ServiceError as exc:
         return _service_error_response(exc)

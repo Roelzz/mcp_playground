@@ -1,5 +1,6 @@
 """SQLite connection factory and schema migrations."""
 
+import contextlib
 import os
 import sqlite3
 import urllib.parse
@@ -11,7 +12,7 @@ from loguru import logger
 
 load_dotenv()
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _JOURNAL_MODES = {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY"}
 _VFS_NAMES = {"unix", "unix-dotfile", "unix-excl", "unix-none"}
@@ -37,6 +38,14 @@ CREATE TABLE IF NOT EXISTS api_key (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     last_used_at TEXT,
     revoked_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS session (
+    token_hash TEXT PRIMARY KEY,
+    username   TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS server (
@@ -120,6 +129,7 @@ CREATE TABLE IF NOT EXISTS call_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dataset_row_dataset ON dataset_row(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_session_expires ON session(expires_at);
 CREATE INDEX IF NOT EXISTS idx_dataset_seed_row_dataset ON dataset_seed_row(dataset_id);
 CREATE INDEX IF NOT EXISTS idx_endpoint_server ON endpoint(server_id);
 CREATE INDEX IF NOT EXISTS idx_dataset_server ON dataset(server_id);
@@ -181,26 +191,63 @@ def db_path() -> str:
     return os.getenv("DB_PATH", "playground.db")
 
 
+def _configured_vfs() -> str:
+    vfs = os.getenv("SQLITE_VFS", "").strip()
+    if vfs and vfs not in _VFS_NAMES:
+        raise ValueError(f"invalid SQLITE_VFS: {vfs!r}")
+    return vfs
+
+
+def _configured_journal_mode() -> str:
+    mode = os.getenv("SQLITE_JOURNAL_MODE", "WAL").strip().upper()
+    if mode not in _JOURNAL_MODES:
+        raise ValueError(f"invalid SQLITE_JOURNAL_MODE: {mode!r}")
+    return mode
+
+
+def ensure_journal_compatible(path: str | None = None) -> str | None:
+    """Convert a WAL database off WAL before a shared-memory-less VFS has to open it.
+
+    WAL needs mmap-backed shared memory, which unix-dotfile cannot provide, so an
+    existing WAL database fails to open at all with "unable to open database file".
+    A database authored locally (WAL is the local default) and then copied to Azure
+    Files would otherwise refuse to boot. Converting checkpoints the -wal file first,
+    so no committed data is lost. Called once at startup, never per request.
+    """
+    target = path or db_path()
+    vfs = _configured_vfs()
+    mode = _configured_journal_mode()
+    if not vfs or vfs == "unix" or mode == "WAL" or not os.path.exists(target):
+        return None
+
+    with contextlib.closing(sqlite3.connect(target)) as conn:
+        current = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(current).lower() != "wal":
+            return None
+        converted = conn.execute(f"PRAGMA journal_mode = {mode}").fetchone()[0]
+
+    logger.warning(
+        f"converted database at {target} from WAL to {converted.upper()} "
+        f"so the {vfs!r} VFS can open it"
+    )
+    return str(converted).upper()
+
+
 def connect(path: str | None = None) -> sqlite3.Connection:
     """Open a connection with configured journaling, foreign keys and row access by name."""
     target = path or db_path()
     # On SMB shares (Azure Files) the default VFS relies on POSIX byte-range locks,
     # which CIFS handles unreliably: SQLite then fails with "database is locked".
     # unix-dotfile uses a lock file instead and still allows multiple connections.
-    vfs = os.getenv("SQLITE_VFS", "").strip()
+    vfs = _configured_vfs()
     if vfs:
-        if vfs not in _VFS_NAMES:
-            raise ValueError(f"invalid SQLITE_VFS: {vfs!r}")
         conn = sqlite3.connect(
             f"file:{urllib.parse.quote(target)}?vfs={vfs}", uri=True, check_same_thread=False
         )
     else:
         conn = sqlite3.connect(target, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    mode = os.getenv("SQLITE_JOURNAL_MODE", "WAL").strip().upper()
-    if mode not in _JOURNAL_MODES:
-        raise ValueError(f"invalid SQLITE_JOURNAL_MODE: {mode!r}")
-    conn.execute(f"PRAGMA journal_mode = {mode}")
+    conn.execute(f"PRAGMA journal_mode = {_configured_journal_mode()}")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(f"PRAGMA busy_timeout = {int(os.getenv('SQLITE_BUSY_TIMEOUT', '5000'))}")
     return conn
@@ -262,6 +309,7 @@ def migrate(conn: sqlite3.Connection) -> int:
 
 
 def init_db(path: str | None = None) -> sqlite3.Connection:
+    ensure_journal_compatible(path)
     conn = connect(path)
     migrate(conn)
     return conn

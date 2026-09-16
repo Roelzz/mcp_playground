@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 import auth
 import db
 import llm
+import netguard
 import service
 import store
 from auth import get_conn
@@ -49,6 +50,16 @@ def _post_chat(
     payload = {"messages": messages or [{"role": "user", "content": "hello"}]}
     payload.update(body)
     return client.post(f"/v1/{slug}/chat/completions", json=payload)
+
+
+def _resolve_upstream_to_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        netguard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (netguard.socket.AF_INET, netguard.socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443))
+        ],
+    )
 
 
 def test_models_returns_openai_list_envelope_and_unknown_slug_404(client: TestClient) -> None:
@@ -198,14 +209,17 @@ def test_mock_streaming_uses_openai_delta_wire_format(client: TestClient) -> Non
     assert reconstructed == "Hello streaming world"
 
 
-def test_proxy_mode_with_empty_upstream_url_returns_400(client: TestClient) -> None:
+def test_proxy_mode_with_empty_upstream_url_returns_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _resolve_upstream_to_public(monkeypatch)
     endpoint = _create_llm(
         client,
         slug="proxy",
         mode="proxy",
         upstream_url="https://example.invalid/v1/chat/completions",
     )
-    service.update_llm_endpoint(_conn(client), endpoint["id"], upstream_url="")
+    store.update_llm_endpoint(_conn(client), endpoint["id"], upstream_url="")
 
     response = _post_chat(client, "proxy")
 
@@ -216,11 +230,13 @@ def test_proxy_mode_with_empty_upstream_url_returns_400(client: TestClient) -> N
 def test_proxy_mode_success_forwards_request_and_returns_upstream_json(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _resolve_upstream_to_public(monkeypatch)
     calls: list[dict[str, Any]] = []
 
     class FakeAsyncClient:
-        def __init__(self, timeout: float) -> None:
+        def __init__(self, timeout: float, follow_redirects: bool) -> None:
             self.timeout = timeout
+            self.follow_redirects = follow_redirects
 
         async def __aenter__(self) -> "FakeAsyncClient":
             return self
@@ -231,7 +247,15 @@ def test_proxy_mode_success_forwards_request_and_returns_upstream_json(
         async def post(
             self, url: str, headers: dict[str, str], json: dict[str, Any]
         ) -> httpx.Response:
-            calls.append({"url": url, "headers": headers, "json": json, "timeout": self.timeout})
+            calls.append(
+                {
+                    "url": url,
+                    "headers": headers,
+                    "json": json,
+                    "timeout": self.timeout,
+                    "follow_redirects": self.follow_redirects,
+                }
+            )
             return httpx.Response(
                 200,
                 json={
@@ -265,6 +289,7 @@ def test_proxy_mode_success_forwards_request_and_returns_upstream_json(
     assert response.status_code == 200, response.text
     assert response.json()["id"] == "upstream"
     assert calls[0]["timeout"] == 60.0
+    assert calls[0]["follow_redirects"] is False
     assert calls[0]["url"] == (
         "https://example.openai.azure.com/openai/deployments/deployment-a/"
         "chat/completions?api-version=2024-10-21"
@@ -282,9 +307,12 @@ def test_proxy_mode_success_forwards_request_and_returns_upstream_json(
 def test_proxy_mode_non_2xx_returns_upstream_status_and_body(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _resolve_upstream_to_public(monkeypatch)
+
     class FakeAsyncClient:
-        def __init__(self, timeout: float) -> None:
+        def __init__(self, timeout: float, follow_redirects: bool) -> None:
             self.timeout = timeout
+            self.follow_redirects = follow_redirects
 
         async def __aenter__(self) -> "FakeAsyncClient":
             return self
@@ -310,6 +338,38 @@ def test_proxy_mode_non_2xx_returns_upstream_status_and_body(
 
     assert response.status_code == 401
     assert response.json()["detail"] == {"error": {"message": "bad key"}}
+
+
+def test_proxy_mode_blocked_upstream_returns_400_without_request(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        netguard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (netguard.socket.AF_INET, netguard.socket.SOCK_STREAM, 0, "", ("169.254.169.254", 80))
+        ],
+    )
+
+    class FakeAsyncClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("blocked upstream should not create an httpx client")
+
+    monkeypatch.setattr(llm.httpx, "AsyncClient", FakeAsyncClient)
+    store.create_llm_endpoint(
+        _conn(client),
+        slug="blocked-proxy",
+        name="Blocked Proxy",
+        mode="proxy",
+        model_name="proxy-model",
+        upstream_url="http://169.254.169.254/metadata",
+        auth_mode="none",
+    )
+
+    response = _post_chat(client, "blocked-proxy")
+
+    assert response.status_code == 400
+    assert "blocked upstream_url" in response.json()["detail"]
 
 
 def _mint_key(client: TestClient, label: str = "trainee", scope: str = "admin") -> str:
