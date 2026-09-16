@@ -406,6 +406,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
   color: var(--text-code);
 }
 .form-grid { display: grid; gap: 14px; }
+.form-grid #proxy-fields { display: grid; gap: 14px; }
 .form-row { display: grid; gap: 7px; }
 .inline-check { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
 .inline-check input { width: auto; margin: 0; }
