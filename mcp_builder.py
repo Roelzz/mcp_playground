@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 from loguru import logger
 from mcp.server import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
@@ -18,6 +19,14 @@ import executor
 import service
 
 IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+# FastMCP defaults its `host` setting to 127.0.0.1 and, seeing that, auto-enables DNS
+# rebinding protection with only localhost in the allowlist. That default is meant for a
+# server that binds its own socket; we mount the app under our own ASGI router and never
+# listen ourselves, so the guard only ever sees the public hostname and answers 421
+# "Invalid Host header". Opt out explicitly to get the behaviour the SDK intends for a
+# mounted app. The endpoints stay protected by the API-key check and the rate limiter.
+TRANSPORT_SECURITY = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 RESERVED_PARAMS = {"limit", "q", "expand"}
 LIST_LIKE = {"list", "search"}
 
@@ -147,6 +156,7 @@ def build_server(conn: sqlite3.Connection, slug: str) -> FastMCP:
         instructions=server_row["description"] or "",
         stateless_http=True,
         json_response=True,
+        transport_security=TRANSPORT_SECURITY,
     )
 
     for endpoint in service.list_endpoints(conn, int(server_row["id"])):

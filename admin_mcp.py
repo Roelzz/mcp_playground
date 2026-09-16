@@ -15,6 +15,7 @@ from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
 import auth
+import mcp_builder
 import portability
 import service
 
@@ -1096,6 +1097,7 @@ def build_admin_server(conn: sqlite3.Connection) -> FastMCP:
         instructions=ADMIN_INSTRUCTIONS,
         stateless_http=True,
         json_response=True,
+        transport_security=mcp_builder.TRANSPORT_SECURITY,
     )
 
     for name, description, params, handler in TOOL_SPECS:

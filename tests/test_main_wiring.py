@@ -165,3 +165,61 @@ def test_rate_limit_leaves_health_and_ui_alone(client: TestClient, monkeypatch) 
     monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "1")
     for _ in range(4):
         assert client.get("/health").status_code == 200
+
+
+# ── Host header handling ──────────────────────────────────────────────────────
+
+# FastMCP defaults its `host` setting to 127.0.0.1 and auto-enables DNS rebinding
+# protection when it sees that, which rejects every other Host with 421.  We mount
+# the app ourselves and are reached on a real hostname in production, so the guard
+# must stay off or no attendee can connect.
+
+
+@pytest.mark.parametrize("path", ["/mcp/contoso-orders", "/mcp/admin"])
+def test_mcp_accepts_a_public_host_header(client: TestClient, path: str) -> None:
+    r = client.post(
+        path,
+        headers={
+            "Host": "agent-playground.westeurope.azurecontainerapps.io",
+            "Accept": "application/json, text/event-stream",
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+    # /mcp/admin answers 401 without a session; either way it must not be 421.
+    assert r.status_code != 421, r.text
+
+
+def test_public_host_header_still_reaches_the_tool_list(client: TestClient) -> None:
+    r = client.post(
+        "/mcp/contoso-orders",
+        headers={
+            "Host": "agent-playground.westeurope.azurecontainerapps.io",
+            "Accept": "application/json, text/event-stream",
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["tools"]
+
+
+def test_mcp_accepts_a_cross_origin_header(client: TestClient) -> None:
+    r = client.post(
+        "/mcp/contoso-orders",
+        headers={
+            "Origin": "https://copilotstudio.microsoft.com",
+            "Accept": "application/json, text/event-stream",
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+    assert r.status_code != 421, r.text
+    assert "tools" in r.json()["result"]
+
+
+def test_host_guard_would_have_caught_the_regression() -> None:
+    """Without the explicit opt-out FastMCP rejects every non-localhost Host."""
+    from mcp.server import FastMCP
+
+    import mcp_builder
+
+    assert mcp_builder.TRANSPORT_SECURITY.enable_dns_rebinding_protection is False
+    assert FastMCP(name="probe").settings.transport_security.enable_dns_rebinding_protection
