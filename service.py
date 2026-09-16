@@ -642,12 +642,26 @@ def delete_endpoint(conn: sqlite3.Connection, endpoint_id: int) -> None:
 # --------------------------------------------------------------------- llm endpoints
 
 
+def _mask_llm_endpoint(llm: dict[str, Any]) -> dict[str, Any]:
+    """Strip the upstream credential and report only whether one is stored.
+
+    Admin-facing readers (REST, admin MCP, and therefore the browser) must never
+    receive the raw key: the trainer runs this UI on a projector in front of ~200
+    attendees. The proxy path deliberately bypasses this helper because it needs
+    the real value to sign upstream calls.
+    """
+    masked = dict(llm)
+    masked["upstream_key_set"] = bool(masked.get("upstream_key"))
+    masked.pop("upstream_key", None)
+    return masked
+
+
 def list_llm_endpoints(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    return store.list_llm_endpoints(conn)
+    return [_mask_llm_endpoint(llm) for llm in store.list_llm_endpoints(conn)]
 
 
 def get_llm_endpoint(conn: sqlite3.Connection, llm_id: int) -> dict[str, Any]:
-    llm = _require_llm(conn, llm_id)
+    llm = _mask_llm_endpoint(_require_llm(conn, llm_id))
     llm["responses"] = store.list_llm_responses(conn, llm_id)
     return llm
 
@@ -694,6 +708,13 @@ def update_llm_endpoint(conn: sqlite3.Connection, llm_id: int, **fields: Any) ->
         fields["upstream_url"] if "upstream_url" in fields else llm["upstream_url"]
     )
     _validate_llm_fields(merged_mode, merged_upstream_url)
+    if fields.pop("clear_upstream_key", False):
+        fields["upstream_key"] = ""
+    elif fields.get("upstream_key") == "":
+        # The UI never receives the stored key, so it submits an empty field when the
+        # trainer left it alone. Treat that as "keep the existing credential" instead of
+        # silently wiping a working proxy.
+        fields.pop("upstream_key")
     with transaction(conn):
         store.update_llm_endpoint(conn, llm_id, **fields)
     return get_llm_endpoint(conn, llm_id)

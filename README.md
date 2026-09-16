@@ -1,8 +1,8 @@
-# MCP Playground
+# Agent Integration Playground
 
 ## What this is
 
-MCP Playground is a browser-managed playground for authoring persistent mock MCP servers and OpenAI-compatible endpoints. It is purpose-built for Microsoft Copilot Studio demos, bootcamps, and solution-architecture training. Admins can model multiple mock servers, multiple endpoints, and shared demo datasets. Definitions and live demo data persist, so trainees can keep working across restarts.
+Agent Integration Playground is a browser-managed playground for authoring persistent mock MCP servers and OpenAI-compatible endpoints. It is purpose-built for Microsoft Copilot Studio demos, bootcamps, and solution-architecture training. Admins can model multiple mock servers, multiple endpoints, and shared demo datasets. Definitions and live demo data persist, so trainees can keep working across restarts.
 
 ## Exposed surfaces
 
@@ -22,7 +22,7 @@ flowchart LR
     Trainer["🧑‍🏫 Trainer<br/>browser or AI agent"]
     Attendee["👥 Attendees<br/>Copilot Studio / Cowork"]
 
-    subgraph App["MCP Playground"]
+    subgraph App["Agent Integration Playground"]
         UI["Admin UI<br/>/ui/"]
         AdminAPI["Admin API<br/>/api/*"]
         AdminMCP["Management MCP<br/>/mcp/_admin — 57 tools"]
@@ -400,6 +400,8 @@ Tools are grouped into nine areas:
 
 `reset_all_to_seed` requires `confirm=true`. Without it, the tool returns `{"ok": false, "error": "set confirm=true to proceed", "would_affect": "..."}` and changes nothing.
 
+LLM endpoint reads never return `upstream_key`. `list_llm_endpoints`, `get_llm_endpoint`, and the create/update responses replace it with a boolean `upstream_key_set`, so a proxy key cannot leak to the browser or to an admin MCP client. Writes still accept `upstream_key`; an empty string leaves the stored key untouched, and `clear_upstream_key: true` removes it. The proxy path reads the real key server-side.
+
 `list_api_keys` returns key metadata only and never exposes a secret hash. `create_api_key` returns the plaintext key exactly once; copy it immediately because it cannot be retrieved again. `delete_api_key` is destructive and requires `confirm=true`.
 
 `export_swagger` returns the server's Swagger/OpenAPI spec and accepts an optional `base_url` override. `export_server` returns a portable JSON bundle for one server. `import_server` imports that bundle and can override the imported slug.
@@ -408,7 +410,7 @@ Tools are grouped into nine areas:
 
 ## Data & persistence
 
-MCP Playground has three data tiers.
+Agent Integration Playground has three data tiers.
 
 Definitions are the authored servers, endpoints, datasets, relationships, and recipes. They persist forever until an admin changes them.
 

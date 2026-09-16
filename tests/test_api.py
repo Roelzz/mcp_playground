@@ -264,3 +264,143 @@ def test_create_tool_rejects_unknown_field_with_400(client: TestClient) -> None:
 
     rows = client.get(f"/api/datasets/{dataset['id']}/rows")
     assert len(rows.json()) == 1
+
+
+# --- upstream credential masking -------------------------------------------
+# The trainer drives this UI on a projector in front of a room of attendees, so a
+# proxy credential must never travel to the browser. These guard the boundary:
+# admin-facing reads mask it, the proxy path still resolves the real value.
+
+
+@pytest.fixture
+def public_upstream(monkeypatch):
+    """Make upstream_url validation resolve to a public IP so netguard allows it."""
+    import netguard
+
+    monkeypatch.setattr(
+        netguard.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (netguard.socket.AF_INET, netguard.socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443))
+        ],
+    )
+
+
+def _post_llm(client: TestClient, key: str = "sk-secret-value") -> dict:
+    response = client.post(
+        "/api/llm-endpoints",
+        json={
+            "slug": "proxied",
+            "name": "Proxied",
+            "mode": "proxy",
+            "upstream_url": "https://example.invalid/v1",
+            "upstream_key": key,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_create_llm_endpoint_does_not_echo_the_upstream_key(
+    client: TestClient, public_upstream
+) -> None:
+    body = _post_llm(client)
+
+    assert "upstream_key" not in body
+    assert body["upstream_key_set"] is True
+
+
+def test_listing_llm_endpoints_never_leaks_the_upstream_key(
+    client: TestClient, public_upstream
+) -> None:
+    _post_llm(client)
+
+    response = client.get("/api/llm-endpoints")
+
+    assert response.status_code == 200, response.text
+    assert "sk-secret-value" not in response.text
+    assert all("upstream_key" not in row for row in response.json())
+    assert response.json()[0]["upstream_key_set"] is True
+
+
+def test_fetching_one_llm_endpoint_never_leaks_the_upstream_key(
+    client: TestClient, public_upstream
+) -> None:
+    created = _post_llm(client)
+
+    response = client.get(f"/api/llm-endpoints/{created['id']}")
+
+    assert response.status_code == 200, response.text
+    assert "sk-secret-value" not in response.text
+    assert response.json()["upstream_key_set"] is True
+
+
+def test_endpoint_without_a_key_reports_upstream_key_set_false(client: TestClient) -> None:
+    response = client.post(
+        "/api/llm-endpoints",
+        json={"slug": "mocky", "name": "Mocky", "mode": "mock"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["upstream_key_set"] is False
+
+
+def test_saving_with_an_empty_key_keeps_the_stored_credential(
+    client: TestClient, public_upstream
+) -> None:
+    created = _post_llm(client)
+
+    patched = client.patch(
+        f"/api/llm-endpoints/{created['id']}",
+        json={"name": "Renamed", "upstream_key": ""},
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["upstream_key_set"] is True
+    stored = store.get_llm_endpoint(client.conn, created["id"])
+    assert stored["upstream_key"] == "sk-secret-value"
+
+
+def test_clear_upstream_key_flag_removes_the_credential(
+    client: TestClient, public_upstream
+) -> None:
+    created = _post_llm(client)
+
+    patched = client.patch(
+        f"/api/llm-endpoints/{created['id']}",
+        json={"clear_upstream_key": True},
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["upstream_key_set"] is False
+    stored = store.get_llm_endpoint(client.conn, created["id"])
+    assert not stored["upstream_key"]
+
+
+def test_a_new_key_still_replaces_the_stored_one(
+    client: TestClient, public_upstream
+) -> None:
+    created = _post_llm(client)
+
+    patched = client.patch(
+        f"/api/llm-endpoints/{created['id']}",
+        json={"upstream_key": "sk-rotated"},
+    )
+
+    assert patched.status_code == 200, patched.text
+    stored = store.get_llm_endpoint(client.conn, created["id"])
+    assert stored["upstream_key"] == "sk-rotated"
+
+
+def test_proxy_lookup_by_slug_still_sees_the_real_key(
+    client: TestClient, public_upstream
+) -> None:
+    # The masking must not reach the proxy path, which needs the credential to
+    # sign upstream calls.
+    import service
+
+    _post_llm(client)
+
+    resolved = service.get_llm_endpoint_by_slug(client.conn, "proxied")
+
+    assert resolved["upstream_key"] == "sk-secret-value"

@@ -15,6 +15,9 @@
     ["keys", "API keys"]
   ];
 
+  // Mirrors READ_TOOL_TYPES in api.py; anything outside this set mutates stored data.
+  var READ_TOOL_TYPES = ["list", "get", "search"];
+
   var state = {
     user: null,
     tab: "catalog",
@@ -133,7 +136,7 @@
   function toast(message, type) {
     var node = document.createElement("div");
     node.className = "toast " + (type || "");
-    node.textContent = message;
+    node.textContent = typeof message === "string" ? message : String(message);
     toastRoot.appendChild(node);
     setTimeout(function () { node.remove(); }, 5200);
   }
@@ -152,14 +155,34 @@
 
   function confirmModal(title, message, actionText) {
     return new Promise(function (resolve) {
-      modalRoot.innerHTML = "<div class=\"modal-backdrop\" role=\"presentation\"><section class=\"modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"modal-title\"><h2 id=\"modal-title\">" + esc(title) + "</h2><p>" + esc(message) + "</p><div class=\"actions\"><button class=\"btn danger\" data-modal=\"yes\">" + esc(actionText || "Delete") + "</button><button class=\"btn\" data-modal=\"no\">Cancel</button></div></section></div>";
+      var previouslyFocused = document.activeElement;
+      // Cancel comes first in the DOM and takes focus: this dialog only ever guards
+      // destructive actions, so a stray Enter must not be the one that deletes.
+      modalRoot.innerHTML = "<div class=\"modal-backdrop\" role=\"presentation\"><section class=\"modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"modal-title\"><h2 id=\"modal-title\">" + esc(title) + "</h2><p>" + esc(message) + "</p><div class=\"actions\"><button class=\"btn\" data-modal=\"no\">Cancel</button><button class=\"btn danger\" data-modal=\"yes\">" + esc(actionText || "Delete") + "</button></div></section></div>";
       var yes = modalRoot.querySelector("[data-modal='yes']");
       var no = modalRoot.querySelector("[data-modal='no']");
-      yes.focus();
+      no.focus();
+
+      function onKeydown(event) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          close(false);
+          return;
+        }
+        if (event.key !== "Tab") return;
+        // Keep focus inside the dialog; there are exactly two focusable controls.
+        event.preventDefault();
+        (document.activeElement === no ? yes : no).focus();
+      }
+
       function close(value) {
+        document.removeEventListener("keydown", onKeydown, true);
         modalRoot.innerHTML = "";
+        if (previouslyFocused && previouslyFocused.focus) previouslyFocused.focus();
         resolve(value);
       }
+
+      document.addEventListener("keydown", onKeydown, true);
       yes.addEventListener("click", function () { close(true); });
       no.addEventListener("click", function () { close(false); });
       modalRoot.querySelector(".modal-backdrop").addEventListener("click", function (event) {
@@ -244,6 +267,7 @@
       response = await fetch(path, opts);
     } catch (err) {
       toast("Network error: " + err.message, "error");
+      err.toasted = true;
       throw err;
     }
     if (response.status === 401 && path !== "/api/auth/me" && path !== "/api/auth/login") {
@@ -259,25 +283,74 @@
       }
     }
     if (!response.ok) {
-      var detail = data && (data.detail || data.message) ? (data.detail || data.message) : response.statusText;
+      var detail = errorText(data, response);
       if (response.status === 429) detail = "Too many attempts. Wait a minute and try again.";
       if (!silentError) toast(detail, "error");
       var error = new Error(detail);
       error.status = response.status;
       error.data = data;
+      error.toasted = !silentError;
       throw error;
     }
     return data;
   }
 
+  // FastAPI returns a 422 detail as an array of {loc, msg} objects. Handing that
+  // straight to toast() printed "[object Object]" and told the trainer nothing.
+  function errorText(data, response) {
+    var detail = data && (data.detail != null ? data.detail : data.message);
+    if (detail == null || detail === "") return response.statusText || "Request failed.";
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      var lines = detail.map(function (item) {
+        if (typeof item === "string") return item;
+        if (!item || typeof item !== "object") return String(item);
+        var loc = Array.isArray(item.loc)
+          ? item.loc.filter(function (part) { return part !== "body" && part !== "query"; }).join(".")
+          : "";
+        var msg = item.msg || item.message || "is invalid";
+        return loc ? loc + ": " + msg : msg;
+      }).filter(Boolean);
+      if (lines.length) return lines.join(" · ");
+    }
+    try { return JSON.stringify(detail); } catch (_err) { return response.statusText || "Request failed."; }
+  }
+
   async function init() {
+    renderBoot("Loading the playground…");
     try {
-      state.user = await api("/api/auth/me");
-      await loadInitial();
-      render();
+      state.user = await api("/api/auth/me", { silentError: true });
     } catch (_err) {
       renderLogin();
+      return;
     }
+    await bootData();
+  }
+
+  // An authentication failure and a data-load failure need different screens. They
+  // used to share one catch, so a 500 on /api/servers dropped the trainer back to the
+  // login form with a perfectly valid session — and signing in again did nothing.
+  async function bootData() {
+    renderBoot("Loading your servers and datasets…");
+    try {
+      await loadInitial();
+    } catch (err) {
+      if (err.message === "not authenticated") return;
+      renderBootError(err.message || "The server did not respond.");
+      return;
+    }
+    render();
+  }
+
+  function renderBoot(message) {
+    app.innerHTML = "<main class=\"boot-screen\"><div class=\"boot-card\"><div class=\"spinner\"></div><p>" + esc(message) + "</p></div></main>";
+  }
+
+  function renderBootError(message) {
+    app.innerHTML = "<main class=\"boot-screen\"><div class=\"boot-card\"><h1>Could not load the playground</h1>" +
+      "<p class=\"help\">" + esc(message) + "</p>" +
+      "<p class=\"help\">Your session is still valid. This is a server or network problem, not a sign-in problem.</p>" +
+      "<div class=\"actions\"><button class=\"btn primary\" type=\"button\" data-action=\"retry-boot\">Try again</button></div></div></main>";
   }
 
   async function loadInitial() {
@@ -395,17 +468,40 @@
   }
 
   function renderLogin(message) {
-    app.innerHTML = "<main class=\"login-screen\"><form class=\"login-card\" data-form=\"login\"><h1>MCP Playground</h1><p>Admin access required.</p>" +
+    app.innerHTML = "<main class=\"login-screen\"><form class=\"login-card\" data-form=\"login\"><h1>Agent Integration Playground</h1><p>Admin access required.</p>" +
       (message ? "<div class=\"error-inline\">" + esc(message) + "</div>" : "") +
       "<div class=\"form-grid\"><div class=\"form-row\"><label for=\"username\">Username</label><input id=\"username\" name=\"username\" autocomplete=\"username\" required></div>" +
       "<div class=\"form-row\"><label for=\"password\">Password</label><input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required></div>" +
       "<button class=\"btn primary full\" type=\"submit\">Sign in</button></div></form></main>";
   }
 
+  // selectedServer() and selectedDataset() quietly fall back to the first record, so a
+  // deleted id kept the dropdown showing nothing selected while the app operated on a
+  // different server. Pin the stored ids to whatever those getters actually resolved to,
+  // and drop edit targets that no longer exist.
+  function syncSelections() {
+    var server = selectedServer();
+    state.selectedServerId = server ? server.id : null;
+    var dataset = selectedDataset();
+    state.selectedDatasetId = dataset ? dataset.id : null;
+    if (state.editingEndpointId != null && !state.endpoints.some(function (e) { return e.id === state.editingEndpointId; })) {
+      state.editingEndpointId = null;
+    }
+    if (state.editingLlmId != null && !state.llms.some(function (l) { return l.id === state.editingLlmId; })) {
+      state.editingLlmId = null;
+      state.llmRules = [];
+    }
+    if (state.testTool && !state.endpoints.some(function (e) { return e.tool_name === state.testTool; })) {
+      state.testTool = null;
+    }
+  }
+
   function render() {
     if (!state.user) return renderLogin();
+    if (!state.loading) syncSelections();
     app.innerHTML = "<div class=\"top-warning\">live endpoint · synthetic data · writes persist — use Reset to seed</div>" +
-      "<div class=\"app-layout\"><aside class=\"sidebar\"><div class=\"brand\"><div class=\"brand-mark\">M</div><div><div class=\"brand-title\">MCP Playground</div><div class=\"brand-subtitle\">Offline admin UI</div></div></div>" +
+      (state.loading ? "<div class=\"load-bar\" role=\"status\" aria-label=\"Loading\"></div>" : "") +
+      "<div class=\"app-layout" + (state.loading ? " is-loading" : "") + "\"><aside class=\"sidebar\"><div class=\"brand\"><div class=\"brand-mark\">A</div><div><div class=\"brand-title\">Agent Integration Playground</div><div class=\"brand-subtitle\">Trainer admin</div></div></div>" +
       navHtml() + userHtml() + "</aside><main class=\"main\">" + pageHtml() + "</main></div>";
     afterRender();
   }
@@ -570,7 +666,7 @@
   function cohortHandoutHtml() {
     if (state.cohortError || !state.cohort.length) return "";
     return "<section class=\"panel cohort-print\"><div class=\"panel-heading cohort-no-print\"><div><h2>Handout preview</h2><p>Exports use the currently visible filtered rows.</p></div></div>" +
-      "<h2 class=\"cohort-print-title\">MCP Playground team handout</h2><p class=\"help cohort-print-note\">API-key servers require a global key supplied separately. Keys are never exported here.</p>" +
+      "<h2 class=\"cohort-print-title\">Agent Integration Playground team handout</h2><p class=\"help cohort-print-note\">API-key servers require a global key supplied separately. Keys are never exported here.</p>" +
       "<div class=\"table-wrap\"><table class=\"cohort-handout-table\"><thead><tr><th>Team slug</th><th>MCP URL</th><th>REST URL</th><th>Auth note</th></tr></thead><tbody>" +
       state.cohort.map(cohortHandoutRow).join("") + "</tbody></table></div><div id=\"cohort-handout-empty\" class=\"empty\" hidden>No rows to export with the current filter.</div></section>";
   }
@@ -870,9 +966,9 @@
       "<div class=\"two-col\"><section class=\"panel\"><h2>" + (editing ? "Edit LLM endpoint" : "Create LLM endpoint") + "</h2><form class=\"form-grid\" data-form=\"llm\">" + hidden("id", editing && editing.id) +
       input("slug", "Slug", editing && editing.slug, "training-gpt") + input("name", "Name", editing && editing.name, "Training GPT") + area("description", "Description", editing && editing.description, "Mock or proxy endpoint") +
       select("mode", "Mode", mode, [["mock", "mock"], ["proxy", "proxy"]]) + input("model_name", "Model name", editing && editing.model_name || "playground-model", "playground-model") + select("auth_mode", "Authentication", editing && editing.auth_mode || "none", [["none", "No authentication"], ["api_key", "API key"]]) +
-      "<div id=\"proxy-fields\">" + input("upstream_url", "Upstream URL", editing && editing.upstream_url, "https://...") + input("upstream_key", "Upstream key", editing && editing.upstream_key, "") + input("upstream_deployment", "Upstream deployment", editing && editing.upstream_deployment, "") + area("system_prompt", "System prompt", editing && editing.system_prompt, "Optional system prompt") + "</div>" +
+      "<div id=\"proxy-fields\">" + input("upstream_url", "Upstream URL", editing && editing.upstream_url, "https://...") + secret("upstream_key", "Upstream key", !!(editing && editing.upstream_key_set)) + input("upstream_deployment", "Upstream deployment", editing && editing.upstream_deployment, "") + area("system_prompt", "System prompt", editing && editing.system_prompt, "Optional system prompt") + "</div>" +
       "<div class=\"actions\"><button class=\"btn primary\" type=\"submit\"" + disabledIfReadonly() + ">" + (editing ? "Save endpoint" : "Create endpoint") + "</button>" + (editing ? "<button class=\"btn\" type=\"button\" data-action=\"cancel-llm-edit\">Cancel</button>" : "") + "</div></form>" +
-      (mode === "mock" && (!editing || details) ? rulesEditorHtml() : "") + "</section><section class=\"panel\"><h2>Endpoints</h2>" + llmListHtml() + "</section></div>";
+      (!editing || details ? "<div id=\"rules-section\"" + (mode === "mock" ? "" : " class=\"hidden\"") + ">" + rulesEditorHtml(!editing) + "</div>" : "") + "</section><section class=\"panel\"><h2>Endpoints</h2>" + llmListHtml() + "</section></div>";
   }
 
   function llmListHtml() {
@@ -882,14 +978,20 @@
     }).join("") + "</div>";
   }
 
-  function rulesEditorHtml() {
-    return "<hr><h3>Mock response rules</h3><p class=\"help\">First match wins by ordinal. Reorder rules to change priority.</p><div class=\"form-grid\" id=\"rules-editor\">" +
+  function rulesEditorHtml(isNew) {
+    // A brand new endpoint has no id yet, so there is nothing to attach rules to.
+    // submitLlm() saves whatever is in this editor right after it creates the
+    // endpoint, which is why the rules survive — but "Save rules" on its own cannot.
+    var note = isNew
+      ? "<p class=\"help\">Rules you add here are saved together with the endpoint. \"Save rules\" becomes available once the endpoint exists.</p>"
+      : "";
+    return "<hr><h3>Mock response rules</h3><p class=\"help\">First match wins by ordinal. Reorder rules to change priority.</p>" + note + "<div class=\"form-grid\" id=\"rules-editor\">" +
       (state.llmRules.length ? state.llmRules.map(ruleHtml).join("") : "<div class=\"empty\">No rules yet. Add one; mock endpoints need a response.</div>") +
-      "<div class=\"actions\"><button class=\"btn\" type=\"button\" data-action=\"add-rule\">Add rule</button><button class=\"btn primary\" type=\"button\" data-action=\"save-rules\"" + disabledIfReadonly() + ">Save rules</button></div></div>";
+      "<div class=\"actions\"><button class=\"btn\" type=\"button\" data-action=\"add-rule\"" + disabledIfReadonly() + ">Add rule</button><button class=\"btn primary\" type=\"button\" data-action=\"save-rules\"" + (isNew ? " disabled" : disabledIfReadonly()) + ">Save rules</button></div></div>";
   }
 
   function ruleHtml(rule, i) {
-    return "<div class=\"rule-card\" data-rule-index=\"" + i + "\"><div class=\"rule-header\"><strong>Ordinal " + (i + 1) + "</strong><div class=\"actions\"><button class=\"btn small\" data-action=\"rule-up\" data-index=\"" + i + "\">↑</button><button class=\"btn small\" data-action=\"rule-down\" data-index=\"" + i + "\">↓</button><button class=\"btn small danger\" data-action=\"remove-rule\" data-index=\"" + i + "\">Remove</button></div></div>" +
+    return "<div class=\"rule-card\" data-rule-index=\"" + i + "\"><div class=\"rule-header\"><strong>Ordinal " + (i + 1) + "</strong><div class=\"actions\"><button class=\"btn small\" data-action=\"rule-up\" data-index=\"" + i + "\"" + disabledIfReadonly() + ">↑</button><button class=\"btn small\" data-action=\"rule-down\" data-index=\"" + i + "\"" + disabledIfReadonly() + ">↓</button><button class=\"btn small danger\" data-action=\"remove-rule\" data-index=\"" + i + "\"" + disabledIfReadonly() + ">Remove</button></div></div>" +
       select("rule_match_type_" + i, "Match type", rule.match_type, [["always","always"],["contains","contains"],["regex","regex"]]) + input("rule_match_value_" + i, "Match value", rule.match_value, "leave empty for always") + area("rule_response_" + i, "Response", rule.response, "Mock response text") + "</div>";
   }
 
@@ -955,7 +1057,7 @@
     return header + "<section class=\"panel test-panel\"><div class=\"panel-heading\"><div><h2>Try it before you wire it up</h2><p>This console calls the real endpoint. The responses are live, not canned.</p></div><span class=\"status-pill\" data-state=\"connected\">" + esc(state.endpoints.length) + " tools · connected</span></div>" +
       "<form data-form=\"tool-call\"><input type=\"hidden\" name=\"tool_name\" id=\"tool-select\" value=\"" + esc(selected) + "\"><div class=\"tool-console-grid\"><aside class=\"tool-rail\">" + toolRailHtml(selected) + "</aside>" +
       "<section class=\"request-pane\"><div class=\"request-lead\"><div><h3>Pick a tool to build a request.</h3><p id=\"tool-help\" class=\"help\"></p></div><button class=\"btn primary\" type=\"submit\"" + (selected ? "" : " disabled") + ">Run tool ▸</button></div>" +
-      "<div class=\"form-grid\"><div class=\"form-row\"><label>Surface</label><select name=\"mode\" id=\"test-mode\">" + modes + "</select><span class=\"help\">REST is what Power Platform calls and can exercise writes. Executor is admin-gated and read-only.</span></div>" +
+      "<div class=\"form-grid\"><div class=\"form-row\"><label>Surface</label><select name=\"mode\" id=\"test-mode\">" + modes + "</select><span class=\"help\">Both surfaces hit real data. REST is what Power Platform calls; Executor is admin-gated but, as admin, also runs write tools. A create or delete tool will change your seed data.</span></div>" +
       keyRow + "<div class=\"form-row\"><label>Parameters JSON</label><textarea class=\"json\" name=\"params\">" + esc(state.testParams) + "</textarea></div></div>" +
       "<div class=\"section-divider\"></div><div class=\"response-block\"><div class=\"response-head\">Response <span class=\"status-pill\" data-state=\"" + esc(responseStatusState()) + "\">" + esc(state.testStatus == null ? "idle" : "HTTP " + state.testStatus) + "</span></div>" + responseHtml() + "</div></section></div></form></section>";
   }
@@ -1036,8 +1138,8 @@
   function connectStepsHtml() {
     var steps = {
       copilot: [["Open tools", "In Copilot Studio, open the agent and go to Tools."], ["Add MCP server", "Choose Add tool, then MCP server, and paste the server fields."], ["Enable orchestration", "Turn generative orchestration on and add an API key if required."]],
-      automate: [["Export OpenAPI", "Copy the Swagger export URL or download it from the server."], ["Create connector", "In Power Automate, create a custom connector from OpenAPI."], ["Use in flows", "Create a connection and call the REST operations from a flow."]],
-      apps: [["Export OpenAPI", "Use the Swagger export for this server's REST endpoints."], ["Create connector", "In Power Apps, create a custom connector from OpenAPI."], ["Add to app", "Create a connection, then use the connector actions in formulas."]],
+      automate: [["Export OpenAPI", "Download the OpenAPI file below while signed in — the export URL is admin-only."], ["Create connector", "In Power Automate, create a custom connector from the OpenAPI file."], ["Use in flows", "Create a connection and call the REST operations from a flow."]],
+      apps: [["Export OpenAPI", "Download the OpenAPI file below while signed in — the export URL is admin-only."], ["Create connector", "In Power Apps, create a custom connector from the OpenAPI file."], ["Add to app", "Create a connection, then use the connector actions in formulas."]],
       vscode: [["Copy server URL", "Use the MCP server URL in your MCP-capable VS Code client."], ["Set auth header", "If API key auth is enabled, send X-API-Key with a key from this app."], ["Test calls", "Run a tool call against the selected server before training."]],
       http: [["Copy REST base", "Use the REST base URL for direct endpoint calls."], ["Send request", "Send JSON bodies for write methods and query strings for reads."], ["Add auth header", "If required, include X-API-Key with each request."]]
     };
@@ -1051,19 +1153,22 @@
     var swaggerUrl = window.location.origin + "/api/servers/" + server.id + "/swagger";
     var auth = server.auth_mode === "api_key" ? "API key" : "No authentication";
     var sets = {
-      copilot: [["Server name", server.name, true], ["Server description", server.description || "Synthetic MCP server from MCP Playground", true], ["Server URL", endpointUrl(server), true], ["Authentication", auth, false], ["REST base URL", restBaseUrl(server), false], ["Swagger export URL", swaggerUrl, false]],
-      automate: [["REST base URL", restBaseUrl(server), true], ["Swagger export URL", swaggerUrl, true], ["Authentication", auth, false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from MCP Playground", false], ["Server URL", endpointUrl(server), false]],
-      apps: [["REST base URL", restBaseUrl(server), true], ["Swagger export URL", swaggerUrl, true], ["Authentication", auth, false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from MCP Playground", false], ["Server URL", endpointUrl(server), false]],
-      vscode: [["Server name", server.name, true], ["Server URL", endpointUrl(server), true], ["Authentication", auth, false], ["Server description", server.description || "Synthetic MCP server from MCP Playground", false], ["REST base URL", restBaseUrl(server), false], ["Swagger export URL", swaggerUrl, false]],
-      http: [["REST base URL", restBaseUrl(server), true], ["Authentication", auth, false], ["Swagger export URL", swaggerUrl, false], ["Server URL", endpointUrl(server), false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from MCP Playground", false]]
+      copilot: [["Server name", server.name, true], ["Server description", server.description || "Synthetic MCP server from Agent Integration Playground", true], ["Server URL", endpointUrl(server), true], ["Authentication", auth, false], ["REST base URL", restBaseUrl(server), false], ["Swagger export URL (admin-only)", swaggerUrl, false]],
+      automate: [["REST base URL", restBaseUrl(server), true], ["Swagger export URL (admin-only)", swaggerUrl, true], ["Authentication", auth, false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from Agent Integration Playground", false], ["Server URL", endpointUrl(server), false]],
+      apps: [["REST base URL", restBaseUrl(server), true], ["Swagger export URL (admin-only)", swaggerUrl, true], ["Authentication", auth, false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from Agent Integration Playground", false], ["Server URL", endpointUrl(server), false]],
+      vscode: [["Server name", server.name, true], ["Server URL", endpointUrl(server), true], ["Authentication", auth, false], ["Server description", server.description || "Synthetic MCP server from Agent Integration Playground", false], ["REST base URL", restBaseUrl(server), false], ["Swagger export URL (admin-only)", swaggerUrl, false]],
+      http: [["REST base URL", restBaseUrl(server), true], ["Authentication", auth, false], ["Swagger export URL (admin-only)", swaggerUrl, false], ["Server URL", endpointUrl(server), false], ["Server name", server.name, false], ["Server description", server.description || "Synthetic MCP server from Agent Integration Playground", false]]
     };
     var fields = sets[state.connectPlatform] || sets.copilot;
-    return "<div class=\"step-copy-grid\">" + fields.map(function (field) { return copyLine(field[0], field[1], field[2]); }).join("") + "</div>";
+    return "<div class=\"step-copy-grid\">" + fields.map(function (field) { return copyLine(field[0], field[1], field[2]); }).join("") + "</div>" +
+      "<div class=\"callout\"><strong>The Swagger export URL is admin-only.</strong>" +
+      "<p class=\"help\">Attendees are not signed in here, so that URL returns 401 for them. Download the file while you are signed in and share it — Power Automate and Power Apps both import a custom connector from an uploaded OpenAPI file.</p>" +
+      "<button class=\"btn small\" type=\"button\" data-action=\"download-swagger\" data-id=\"" + esc(server.id) + "\" data-slug=\"" + esc(server.slug) + "\">Download OpenAPI file</button></div>";
   }
 
   function authGroupHtml(server) {
     var hasKey = server.auth_mode === "api_key";
-    return "<div class=\"form-row\"><label>Authentication</label><div class=\"auth-pill\"><label class=\"auth-option\"><input type=\"radio\" disabled" + (!hasKey ? " checked" : "") + "> None</label><label class=\"auth-option\"><input type=\"radio\" disabled" + (hasKey ? " checked" : "") + "> API key</label><label class=\"auth-option\"><input type=\"radio\" disabled> OAuth 2.0</label></div><span class=\"help\">MCP Playground currently emits no-auth or API-key setup values. API keys are sent as <code>X-API-Key</code>.</span></div>";
+    return "<div class=\"form-row\"><label>Authentication</label><div class=\"auth-pill\"><label class=\"auth-option\"><input type=\"radio\" disabled" + (!hasKey ? " checked" : "") + "> None</label><label class=\"auth-option\"><input type=\"radio\" disabled" + (hasKey ? " checked" : "") + "> API key</label><label class=\"auth-option\"><input type=\"radio\" disabled> OAuth 2.0</label></div><span class=\"help\">Agent Integration Playground currently emits no-auth or API-key setup values. API keys are sent as <code>X-API-Key</code>.</span></div>";
   }
 
   function copyLine(label, value, required) {
@@ -1097,6 +1202,21 @@
 
   function hidden(name, value) {
     return value ? "<input type=\"hidden\" name=\"" + esc(name) + "\" value=\"" + esc(value) + "\">" : "";
+  }
+
+  // The stored upstream credential is never sent to the browser, so this field is
+  // always blank. Leaving it blank on save keeps the existing key; the checkbox is
+  // the only way to remove one.
+  function secret(name, label, isSet) {
+    var help = isSet
+      ? "A key is stored. Leave blank to keep it, or type a new one to replace it."
+      : "No key stored yet.";
+    var clear = isSet
+      ? "<label class=\"inline-check\"><input type=\"checkbox\" name=\"clear_upstream_key\" value=\"1\"> Clear stored key</label>"
+      : "";
+    return "<div class=\"form-row\"><label for=\"" + esc(name) + "\">" + esc(label) + "</label>" +
+      "<input id=\"" + esc(name) + "\" name=\"" + esc(name) + "\" type=\"password\" autocomplete=\"new-password\" value=\"\" placeholder=\"" + (isSet ? "••••••••  (unchanged)" : "Paste the upstream key") + "\">" +
+      "<p class=\"help\">" + esc(help) + "</p>" + clear + "</div>";
   }
 
   function afterRender() {
@@ -1267,7 +1387,12 @@
   function updateProxyFields() {
     var mode = document.querySelector("form[data-form='llm'] select[name='mode']");
     var fields = document.getElementById("proxy-fields");
-    if (mode && fields) fields.classList.toggle("hidden", mode.value !== "proxy");
+    if (!mode) return;
+    if (fields) fields.classList.toggle("hidden", mode.value !== "proxy");
+    // The rules editor only applies to mock mode. It is always in the DOM so the
+    // switch works without a re-render, which would discard whatever was typed.
+    var rules = document.getElementById("rules-section");
+    if (rules) rules.classList.toggle("hidden", mode.value !== "mock");
   }
 
   function updateToolHelp() {
@@ -1279,6 +1404,9 @@
     var param = (endpoint.path.match(/\{([^}]+)\}/) || [])[1];
     var type = toolTypeForEndpoint(endpoint);
     var hints = "<strong>" + esc(endpoint.method + " " + endpoint.path) + "</strong> · " + esc(type) + (param ? " · requires parameter <code>" + esc(param) + "</code>" : "") + (type === "search" ? " · optional <code>q</code> and <code>limit</code>" : type === "list" ? " · optional filters and <code>limit</code>" : "");
+    if (READ_TOOL_TYPES.indexOf(type) === -1) {
+      hints += "<div class=\"help warn-inline\">Heads up: this tool mutates stored data. Running it here changes the dataset your attendees will see.</div>";
+    }
     if (state.testMode === "rest") {
       var sendsBody = ["POST", "PUT", "PATCH"].indexOf(String(endpoint.method).toUpperCase()) !== -1;
       hints += "<div class=\"help\" style=\"margin-top:6px\">Calls <code>" + esc(restUrl(selectedServer(), endpoint)) + "</code>. Path placeholders are filled from the parameters; the rest go in the " + (sendsBody ? "JSON body" : "query string") + ".</div>";
@@ -1441,8 +1569,16 @@
       state.testStatus = null;
       state.testCurl = null;
       state.testTool = null;
-      await refreshForServer();
+      state.loading = true;
       render();
+      try {
+        await refreshForServer();
+      } catch (err) {
+        if (err.message !== "not authenticated" && !err.toasted) toast(err.message, "error");
+      } finally {
+        state.loading = false;
+        if (state.user) render();
+      }
     }
     if (event.target.matches("form[data-form='endpoint'] select[name='method']")) updateToolTypePreview();
     if (event.target.matches("form[data-form='llm'] select[name='mode']")) updateProxyFields();
@@ -1487,7 +1623,7 @@
       if (form.dataset.form === "key") await submitKey(form);
       if (form.dataset.form === "relationship") await submitRelationship(form);
     } catch (err) {
-      if (err.message !== "not authenticated") toast(err.message, "error");
+      if (err.message !== "not authenticated" && !err.toasted) toast(err.message, "error");
     } finally {
       setBusy(button, false);
     }
@@ -1545,13 +1681,15 @@
       if (action === "clear-traffic") await clearTraffic();
       if (action === "toggle-traffic") { state.expandedTraffic = String(state.expandedTraffic) === String(button.dataset.id) ? null : button.dataset.id; render(); }
       if (action === "select-connect-platform") { state.connectPlatform = button.dataset.platform; render(); }
+      if (action === "download-swagger") await downloadSwagger(button);
+      if (action === "retry-boot") await bootData();
       if (action === "dismiss-key") { state.newKey = null; render(); }
       if (action === "delete-key") await deleteItem("API key", button.dataset.id, button.dataset.name, "/api/keys/" + button.dataset.id, async function () { await loadKeys(); });
       if (action === "delete-relationship") await deleteItem("relationship", button.dataset.id, button.dataset.name, "/api/relationships/" + button.dataset.id, loadRelationships);
       if (action === "validate-relationships") await validateRelationships(button);
       if (action === "ensure-demo-relationships") await ensureDemoRelationships(button);
     } catch (err) {
-      if (err.message !== "not authenticated") toast(err.message, "error");
+      if (err.message !== "not authenticated" && !err.toasted) toast(err.message, "error");
     }
   });
 
@@ -1565,8 +1703,7 @@
   async function submitLogin(form) {
     var data = formData(form);
     state.user = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ username: data.username, password: data.password }) });
-    await loadInitial();
-    render();
+    await bootData();
   }
 
   async function submitServer(form) {
@@ -1738,6 +1875,20 @@
     window.open(recipeUrl(draft.slug), "_blank", "noopener");
   }
 
+  async function downloadSwagger(button) {
+    var spec = await api("/api/servers/" + encodeURIComponent(button.dataset.id) + "/swagger");
+    var blob = new Blob([JSON.stringify(spec, null, 2)], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = (button.dataset.slug || "server") + "-openapi.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast("OpenAPI file downloaded. Share this file with attendees.", "ok");
+  }
+
   function downloadRecipeHandout() {
     var draft = captureRecipeDraft();
     if (!draft.id) return;
@@ -1753,6 +1904,7 @@
       payload.upstream_deployment = data.upstream_deployment || null;
       payload.system_prompt = data.system_prompt || null;
     }
+    if (data.clear_upstream_key) payload.clear_upstream_key = true;
     var saved;
     if (data.id) saved = await api("/api/llm-endpoints/" + data.id, { method: "PATCH", body: JSON.stringify(payload) });
     else saved = await api("/api/llm-endpoints", { method: "POST", body: JSON.stringify(payload) });
@@ -1791,6 +1943,7 @@
         response = await fetch(request.url, options);
       } catch (err) {
         toast("Network error: " + err.message, "error");
+        err.toasted = true;
         throw err;
       }
       var text = await response.text();
@@ -1915,12 +2068,24 @@
     state.keys = await api("/api/keys");
   }
 
+  // render() replaces the whole app element, so an unattended refresh would wipe out
+  // whatever the trainer is typing mid-demo. Hold off while a field has focus.
+  function isEditingAField() {
+    var active = document.activeElement;
+    if (!active) return false;
+    var tag = active.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || active.isContentEditable;
+  }
+
   function configureTrafficTimer() {
     if (state.trafficTimer) clearInterval(state.trafficTimer);
     state.trafficTimer = null;
     if (state.autoTraffic) {
       state.trafficTimer = setInterval(function () {
-        api("/api/traffic").then(function (rows) { state.traffic = rows; if (state.tab === "traffic") render(); }).catch(function () {});
+        api("/api/traffic", { silentError: true }).then(function (rows) {
+          state.traffic = rows;
+          if (state.tab === "traffic" && !isEditingAField()) render();
+        }).catch(function () {});
       }, 3000);
     }
   }
@@ -1942,10 +2107,17 @@
     }
   }
 
+  // Every read costs about a second against Azure Files, so the tab has to repaint
+  // before the data arrives. Without this the trainer clicks and the screen sits
+  // there, and a failed load used to leave state.tab pointing at a tab the DOM
+  // never rendered.
   document.addEventListener("click", async function (event) {
     var tab = event.target.closest("[data-tab]");
     if (!tab) return;
+    var previous = state.tab;
     state.tab = tab.dataset.tab;
+    state.loading = true;
+    render();
     try {
       if (state.tab === "catalog") { await loadCatalog(); await loadRecipes(); }
       if (state.tab === "recipes") await loadRecipes();
@@ -1955,9 +2127,12 @@
       if (state.tab === "llm") await loadLlms();
       if (state.tab === "traffic") state.traffic = await api("/api/traffic");
       if (state.tab === "keys") await loadKeys();
-      render();
     } catch (err) {
-      if (err.message !== "not authenticated") toast(err.message, "error");
+      state.tab = previous;
+      if (err.message !== "not authenticated" && !err.toasted) toast(err.message, "error");
+    } finally {
+      state.loading = false;
+      if (state.user) render();
     }
   });
 

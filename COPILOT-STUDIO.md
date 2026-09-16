@@ -1,6 +1,6 @@
-# Connecting MCP Playground to Copilot Studio
+# Connecting Agent Integration Playground to Copilot Studio
 
-MCP Playground exposes every mock server through two independent surfaces. Pick the one that fits your situation:
+Agent Integration Playground exposes every mock server through two independent surfaces. Pick the one that fits your situation:
 
 | Path | Surface | When to use |
 |------|---------|-------------|
@@ -37,7 +37,7 @@ Path A is fewer steps and stays in sync automatically when you add a tool. Path 
 
 ## Bootcamp provisioning for trainers
 
-Trainees do not log into MCP Playground. Trainers provision the mock servers first, then hand out URLs.
+Trainees do not log into Agent Integration Playground. Trainers provision the mock servers first, then hand out URLs.
 
 1. Build one good source server, or use one of the seeded sample servers.
 2. Open the **Catalog** tab, the first tab in the sidebar.
@@ -132,7 +132,7 @@ The 7 seeded recipes are all published. Two are cross-server, and the set spans 
 
 A misconfigured Copilot Studio agent is hard to debug. A misconfigured mock server is easy to debug — but only if you test it before leaving the playground.
 
-1. In the MCP Playground UI, select your server from the top dropdown.
+1. In the Agent Integration Playground UI, select your server from the top dropdown.
 2. Click the **Test console** tab.
 3. Pick a tool from the **Tool** dropdown. Each entry shows the tool name and the HTTP method + path it calls (e.g. `get_order — GET /orders/{id}`).
 4. Keep **Surface** set to `REST — /mock/{slug}`.
@@ -224,11 +224,9 @@ The agent should call the `get_order` tool and return the seeded record. If it d
 
 1. Select your server in the top dropdown.
 2. Click the **Connect it** tab.
-3. In the **Or connect it as a REST custom connector** section, find the **Swagger export** URL. It looks like:
-   ```
-   http://localhost:2009/api/servers/<id>/swagger
-   ```
-4. Open that URL in your browser, or append `?download=true` to force a file download named `{slug}-swagger.json`.
+3. In the **Or connect it as a REST custom connector** section, click **Download OpenAPI file**. The browser saves `{slug}-swagger.json`.
+
+The Swagger export is admin-only: it lives behind your admin session, so the URL shown next to the button (`http://localhost:2009/api/servers/<id>/swagger`) returns `401` for anyone who is not signed in. Download the file yourself and share it with participants — do not hand out the URL.
 
 The downloaded file is a Swagger 2.0 document. Its `basePath` is `/mock/contoso-orders` and its `host` is derived from the `PUBLIC_BASE_URL` environment variable (default: `localhost:2009`). The `schemes` array matches the scheme of that URL (`http` for a local instance).
 

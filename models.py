@@ -87,6 +87,9 @@ class LLMEndpointUpdate(BaseModel):
     upstream_deployment: str | None = None
     system_prompt: str | None = None
     auth_mode: AuthMode | None = None
+    # Responses never carry the stored key back, so an empty upstream_key means
+    # "leave it alone". This flag is the only way to actually remove one.
+    clear_upstream_key: bool = False
 
 
 RelationType = Literal["many_to_one", "one_to_one"]
